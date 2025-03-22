@@ -1,0 +1,181 @@
+#A Snakemake workflow to process Nanopore fastq files.
+
+import glob
+import os
+from os.path import join, basename, dirname
+import pandas as pd
+from snakemake.io import expand
+from snakemake.utils import R
+from snakemake.io import glob_wildcards
+import re
+from os.path import join
+
+
+#################
+HOST = "jiyang.jiang"
+HOMEDIR = "/home/jiyang.jiang"
+
+
+
+
+################
+SANDBOX = "lustre/scratch/ad_app_jiyang/sandbox"
+GUID = "6fd9bff1-4cb1-43a7-a88f-a8c116c8fdeb"
+INPUTDIR = SANDBOX + "/" + GUID + "/" + "Input"
+OUTPUTDIR = SANDBOX + "/" + GUID + "/" + "Output"
+
+GPUHOST = HOST + "@cfu0142449"
+GPUWORKDIR = "/home/" + HOST + "/" + "sandbox"
+
+FAST5DIR = INPUTDIR + "/" + "fast5"
+RAWFASTQDIR = INPUTDIR + "/" + "fastq"
+
+SMAPLESHEET = "SampleSheet.csv"
+
+################Extract nanopore run information
+
+#porerefiner_ver,1.0.0,,,,,
+#library_id,TEST_TEST,,,,,
+#sequencing_kit,TEST_KIT,,,,,
+#sample_id,accession,barcode_id,organism,extraction_kit,comment,user
+#TEST01,ACC_TEST_01,1,Salmonella coli,TEST_KIT_KIT,"a comment, with a comma in it",justin.payne@fda.hhs.gov
+#TEST02,ACC_TEST_02,2,Escherichia enteriditis,TEST_KIT_KIT,,justin.payne@fda.hhs.gov
+#TEST03,ACC_TEST_03,3,Campy stampy,TEST_KIT_KIT,,justin.payne@fda.hhs.gov
+#TEST04,ACC_TEST_04,1,Salmonella coli,TEST_KIT_KIT,"a comment, with a comma in it",justin.payne@fda.hhs.gov
+#TEST05,ACC_TEST_05,2,Escherichia enteriditis,TEST_KIT_KIT,,justin.payne@fda.hhs.gov
+#TEST06,ACC_TEST_06,3,Campy stampy,TEST_KIT_KIT,,justin.payne@fda.hhs.gov
+#TEST07,ACC_TEST_07,1,Salmonella coli,TEST_KIT_KIT,"a comment, with a comma in it",justin.payne@fda.hhs.gov
+#TEST08,ACC_TEST_08,2,Escherichia enteriditis,TEST_KIT_KIT,,justin.payne@fda.hhs.gov
+#TEST09,ACC_TEST_09,3,Campy stampy,TEST_KIT_KIT,,justin.payne@fda.hhs.gov
+#TEST10,ACC_TEST_10,1,Salmonella coli,TEST_KIT_KIT,"a comment, with a comma in it",justin.payne@fda.hhs.gov
+#TEST11,ACC_TEST_11,2,Escherichia enteriditis,TEST_KIT_KIT,,justin.payne@fda.hhs.gov
+#TEST12,ACC_TEST_12,3,Campy stampy,TEST_KIT_KIT,,justin.payne@fda.hhs.gov
+#
+#
+
+
+data1 = pd.read_csv("/" + INPUTDIR + "/" + SMAPLESHEET, sep=",", nrows=2)
+LIBID = str(data1.iloc[:,1][0])
+print (LIBID)
+SEQKIT = str(data1.iloc[:,1][1])
+print (SEQKIT)
+data2 = pd.read_csv("/" + INPUTDIR + "/" + SMAPLESHEET, sep=",", skiprows=3)
+SAMPLESID = list(data2.sample_id)
+print (SAMPLESID)
+NUMSAM = len(SAMPLESID)
+print (NUMSAM)
+CFSANACC = list(data2.accession)
+print (CFSANACC)
+ORGANISM = list(data2.organism)
+print (ORGANISM)
+EXTRAKIT = list(set(data2.extraction_kit))
+print (EXTRAKIT)
+USER = list(set(data2.user))
+print (USER)
+BARCODES = ['barcode' + "{:02}".format(num) for num in data2.barcode_id]
+print (BARCODES)
+EXTRAKIT = set(data2.extraction_kit)
+print (EXTRAKIT)
+
+localrules: all, fast5_data_transfer, fast5md5sum_generation, fast5md5sum_compare, guppy_basecall, fastqmd5_generation, fastqmd5_compare
+
+
+rule all:
+    input:
+         "/" + OUTPUTDIR + "/" + "fast5_transfered",
+         "/" + OUTPUTDIR + "/" + "fast5idenitical",
+         "/" + OUTPUTDIR + "/" + "bascall_finished",
+         "/" + OUTPUTDIR + "/" + "fastqidenitical",
+
+rule fast5_data_transfer:
+#    input:
+#        data = "/" + FAST5DIR
+    output:
+        touch("/" + OUTPUTDIR + "/" + "fast5_transfered")
+    shell:
+         """
+         ssh {GPUHOST} "if test -d {HOMEDIR}/{FAST5DIR}; then rm -rf {HOMEDIR}/{FAST5DIR}; fi"
+         rsync -zarvh -R /{FAST5DIR} {GPUHOST}:
+         """
+
+rule fast5md5sum_generation:
+    input:
+        "/" + OUTPUTDIR + "/" + "fast5_transfered"
+#        "/" + FAST5DIR
+    output:
+        touch("/" + OUTPUTDIR + "/" + "checklistfast5"),
+        check1 = "/" + OUTPUTDIR + "/fast5checksre",
+        check2 = "/" + OUTPUTDIR + "/fast5checkdes",
+    shell:
+        """
+        md5sum /{FAST5DIR}/*fast5 > /{OUTPUTDIR}/fast5checksre
+        ssh ad_app_jiyang.jiang@cfu0142449 md5sum "/home/ad_app_jiyang.jiang/{FAST5DIR}/*fast5" > /{OUTPUTDIR}/fast5checkdes
+        """
+
+rule fast5md5sum_compare:
+    input:
+        d1 = "/" + OUTPUTDIR +"/" + "fast5checksre",
+        d2 = "/" + OUTPUTDIR +"/" + "fast5checkdes"
+    output:
+        touch("/" + OUTPUTDIR + "/" + "fast5idenitical")
+    run:
+        data1 = pd.read_csv("/" + OUTPUTDIR + "/" + "fast5checksre", sep=" ", names=["md5","blank","filepath"])
+        data2 = pd.read_csv("/" + OUTPUTDIR + "/" + "fast5checkdes", sep=" ", names=["md5","blank","filepath"])
+        list1 = list(data1.sort_values(['filepath','md5'],ascending=[1,0]).iloc[:,0])
+        print (list1)
+        list2 = list(data2.sort_values(['filepath','md5'],ascending=[1,0]).iloc[:,0])
+        print (list2)
+        if list1 == list2:
+            print ("The lists are identical, data transfer sucessed")
+#            touch("/" + OUTPUTDIR + "/" + "idenitical")
+        else:
+            print ("The lists are NOT identical, fast5 data transfer error")
+            os.remove("/" + OUTPUTDIR + "/" + "fast5idenitical")
+
+rule guppy_basecall:
+    input:
+         data = "/" + FAST5DIR
+    output:
+         touch("/" + OUTPUTDIR + "/" + "bascall_finished")
+    shell:
+         """
+         ssh {GPUHOST} "if test -d {HOMEDIR}/{RAWFASTQDIR} ; then rm -rf {HOMEDIR}/{RAWFASTQDIR}; fi"
+         ssh {GPUHOST} "guppy_basecaller -i {HOMEDIR}/{FAST5DIR} -s {HOMEDIR}/{RAWFASTQDIR} -c dna_r9.4.1_450bps_hac.cfg -x "cuda:0" --compress_fastq --min_score 7"
+         rsync -zarvh -R {GPUHOST}:{HOMEDIR}/{RAWFASTQDIR}/ ./temp
+         cp -R ./temp{HOMEDIR}/{RAWFASTQDIR}/ {RAWFASTQDIR}
+         rm -rf ./temp{HOMEDIR}/{RAWFASTQDIR}/
+         """
+
+rule fastqmd5_generation:
+    output:
+         touch("/"+ OUTPUTDIR + "/" + "fastqchecklist")
+    shell:
+         """
+         if test -f /{OUTPUTDIR}/fastqcheck*; then rm -rf /{OUTPUTDIR}/fastqcheck*; fi
+         ssh ad_app_jiyang.jiang@cfu0142449 "md5sum /home/ad_app_jiyang.jiang/{RAWFASTQDIR}/*fastq.gz" > /{OUTPUTDIR}/fastqchecksre
+         md5sum /{RAWFASTQDIR}/*fastq.gz > /{OUTPUTDIR}/fastqcheckdes
+         """
+
+rule fastqmd5_compare:
+    input:
+#         "/"+ OUTPUTDIR + "/" + "fastqchecklist",
+         "/" + OUTPUTDIR +"/" + "fastqchecksre",
+         "/" + OUTPUTDIR +"/" + "fastqcheckdes"
+    output:
+        touch("/" + OUTPUTDIR + "/" + "fastqidenitical")
+    run:
+        data1 = pd.read_csv("/" + OUTPUTDIR + "/" + "fastqchecksre", sep=" ", names=["md5","blank","filepath"])
+        data2 = pd.read_csv("/" + OUTPUTDIR + "/" + "fastqcheckdes", sep=" ", names=["md5","blank","filepath"])
+        list1 = list(data1.sort_values(['filepath','md5'],ascending=[1,0]).iloc[:,0])
+#        print (list1)
+        list2 = list(data2.sort_values(['filepath','md5'],ascending=[1,0]).iloc[:,0])
+#        print (list2)
+        if list1 == list2:
+            print ("The lists are identical, data transfer sucessed")
+#            touch("/" + OUTPUTDIR + "/" + "idenitical")
+        else:
+            print ("The lists are NOT identical, fastq data transfer error")
+            os.remove("/" + OUTPUTDIR + "/" + "fastqidenitical")
+
+
+

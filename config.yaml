@@ -1,0 +1,23 @@
+# Configuration for hybrid Nanopore-Illumina bacterial genome assembly pipeline
+
+# Sample information
+samples:
+  sample1:  # Sample name, replace with your sample ID
+    nanopore: "data/nanopore/sample1.fastq.gz"  # Path to Nanopore reads
+    illumina_r1: "data/illumina/sample1_R1.fastq.gz"  # Path to Illumina forward reads
+    illumina_r2: "data/illumina/sample1_R2.fastq.gz"  # Path to Illumina reverse reads
+    genome_size: "5m"  # Estimated genome size (e.g., "5m" for 5 Mbp)
+    busco_lineage: "bacteria_odb10"  # BUSCO lineage, choose appropriate for your organism
+  
+  # Add more samples as needed
+  # sample2:
+  #   nanopore: "data/nanopore/sample2.fastq.gz"
+  #   illumina_r1: "data/illumina/sample2_R1.fastq.gz"
+  #   illumina_r2: "data/illumina/sample2_R2.fastq.gz"
+  #   genome_size: "4.8m"
+  #   busco_lineage: "bacteria_odb10"
+
+# Resource configuration
+resources:
+  max_threads: 32  # Maximum number of threads to use
+  max_memory_gb: 64  # Maximum memory to use in GB
