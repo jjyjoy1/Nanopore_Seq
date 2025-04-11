@@ -1,0 +1,6 @@
+sample_id,tissue_type,cancer_status
+sample1,lung,normal
+sample2,lung,cancer
+normal_lung,lung,normal
+tumor_lung,lung,cancer
+

@@ -1,0 +1,36 @@
+# Configuration for Direct RNA Sequencing Pipeline
+# Save as config.yaml
+
+# Sample information - list of sample directories in FAST5_DIR
+samples:
+  - "sample1"
+  - "sample2"
+  - "normal_lung"
+  - "tumor_lung"
+
+# Reference files directory
+references: "references"
+transcriptome: "transcriptome.fa"
+
+# Ribosomal RNA IDs to focus on
+rRNA_ids: "18S,28S,5.8S,5S"
+
+# Directories
+fast5_dir: "fast5_files"
+output_dir: "output"
+
+# Sample metadata file path (CSV with sample_id, tissue_type, cancer_status columns)
+metadata: "sample_metadata.csv"
+
+# Computational resources
+threads:
+  guppy: 4
+  align: 8
+  tombo: 8
+
+# GPU device for basecalling (use "auto" for automatic selection)
+gpu_device: "cuda:0"
+
+# Guppy config for RNA
+guppy_config: "rna_r9.4.1_70bps_hac.cfg"
+

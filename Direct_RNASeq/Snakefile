@@ -1,0 +1,158 @@
+# Snakefile for Direct RNA Sequencing rRNA Modification Analysis
+# Save this as 'Snakefile' in your project directory
+
+import os
+import glob
+from os.path import join
+
+# Configuration
+configfile: "config.yaml"
+
+# Define sample information
+SAMPLES = config["samples"]
+REFERENCES = config["references"]
+OUTPUT_DIR = config["output_dir"]
+FAST5_DIR = config["fast5_dir"]
+
+# Create output directories
+for directory in ["basecalled", "alignments", "tombo", "modifications", "results"]:
+    os.makedirs(join(OUTPUT_DIR, directory), exist_ok=True)
+
+# Final target rule
+rule all:
+    input:
+        expand(join(OUTPUT_DIR, "basecalled/{sample}"), sample=SAMPLES),
+        expand(join(OUTPUT_DIR, "alignments/{sample}.sorted.bam"), sample=SAMPLES),
+        expand(join(OUTPUT_DIR, "alignments/{sample}.sorted.bam.bai"), sample=SAMPLES),
+        join(OUTPUT_DIR, "results/rRNA_modifications_for_ML.csv"),
+        join(OUTPUT_DIR, "results/classification_report.txt"),
+        join(OUTPUT_DIR, "results/important_modifications.png")
+
+# Basecalling with Guppy
+rule basecall:
+    input:
+        fast5=join(FAST5_DIR, "{sample}")
+    output:
+        directory(join(OUTPUT_DIR, "basecalled/{sample}"))
+    threads: config["threads"]["guppy"]
+    shell:
+        """
+        guppy_basecaller \
+            -i {input.fast5} \
+            -s {output} \
+            --config {config[guppy_config]} \
+            --device {config[gpu_device]} \
+            --num_callers {threads}
+        """
+
+# Align reads to reference transcriptome
+rule align:
+    input:
+        fastq=join(OUTPUT_DIR, "basecalled/{sample}"),
+        reference=join(REFERENCES, config["transcriptome"])
+    output:
+        sam=temp(join(OUTPUT_DIR, "alignments/{sample}.sam")),
+        bam=join(OUTPUT_DIR, "alignments/{sample}.sorted.bam")
+    threads: config["threads"]["align"]
+    shell:
+        """
+        find {input.fastq}/pass -name "*.fastq" | xargs cat > {wildcards.sample}.merged.fastq
+        minimap2 -ax map-ont \
+            -t {threads} \
+            {input.reference} \
+            {wildcards.sample}.merged.fastq > {output.sam}
+        samtools sort -@ {threads} -o {output.bam} {output.sam}
+        rm {wildcards.sample}.merged.fastq
+        """
+
+# Index BAM files
+rule index_bam:
+    input:
+        bam=join(OUTPUT_DIR, "alignments/{sample}.sorted.bam")
+    output:
+        bai=join(OUTPUT_DIR, "alignments/{sample}.sorted.bam.bai")
+    shell:
+        """
+        samtools index {input.bam}
+        """
+
+# Resquiggle raw signal to reference sequence (Tombo)
+rule resquiggle:
+    input:
+        fast5=join(FAST5_DIR, "{sample}"),
+        reference=join(REFERENCES, config["transcriptome"])
+    output:
+        sentinel=join(OUTPUT_DIR, "tombo/{sample}.resquiggled")
+    threads: config["threads"]["tombo"]
+    shell:
+        """
+        tombo resquiggle \
+            {input.fast5} \
+            {input.reference} \
+            --processes {threads} \
+            --fit-scale \
+            --include-event-stdev \
+            --corrected-group RescoreFast5
+        
+        # Create sentinel file to mark completion
+        touch {output.sentinel}
+        """
+
+# Detect modifications with Tombo
+rule detect_modifications:
+    input:
+        expand(join(OUTPUT_DIR, "tombo/{sample}.resquiggled"), sample=SAMPLES)
+    output:
+        stats=join(OUTPUT_DIR, "modifications/mod_stats.rna.tombo.stats")
+    params:
+        fast5_dirs=lambda wildcards: " ".join([join(FAST5_DIR, sample) for sample in SAMPLES])
+    threads: config["threads"]["tombo"]
+    shell:
+        """
+        tombo detect_modifications alternative_model \
+            --fast5-basedirs {params.fast5_dirs} \
+            --statistics-file-basename {OUTPUT_DIR}/modifications/mod_stats \
+            --processes {threads} \
+            --alternate-bases all
+        """
+
+# Extract modification data to CSV
+rule extract_modifications:
+    input:
+        stats=join(OUTPUT_DIR, "modifications/mod_stats.rna.tombo.stats")
+    output:
+        mods=join(OUTPUT_DIR, "modifications/rRNA_mods.dampened_fraction.csv")
+    params:
+        rRNA_ids=config["rRNA_ids"]
+    shell:
+        """
+        tombo text_output dampened_fraction \
+            --statistics-filename {input.stats} \
+            --output-basename {OUTPUT_DIR}/modifications/rRNA_mods \
+            --per-read-stats-filename {OUTPUT_DIR}/modifications/per_read_stats.rna.tombo.stats \
+            --num-most-significant-stored 10000 \
+            --regions {params.rRNA_ids}
+        """
+
+# Process modification data for machine learning
+rule prepare_ml_data:
+    input:
+        mods=join(OUTPUT_DIR, "modifications/rRNA_mods.dampened_fraction.csv"),
+        metadata=config["metadata"]
+    output:
+        ml_data=join(OUTPUT_DIR, "results/rRNA_modifications_for_ML.csv")
+    script:
+        "scripts/prepare_ml_data.py"
+
+# Train model and classify samples
+rule classify_samples:
+    input:
+        ml_data=join(OUTPUT_DIR, "results/rRNA_modifications_for_ML.csv")
+    output:
+        report=join(OUTPUT_DIR, "results/classification_report.txt"),
+        importance=join(OUTPUT_DIR, "results/important_modifications.png"),
+        model=join(OUTPUT_DIR, "results/rRNA_classifier_model.pkl")
+    script:
+        "scripts/train_classifier.py"
+
+
