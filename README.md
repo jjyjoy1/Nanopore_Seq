@@ -1,60 +1,94 @@
-Hybrid Nanopore-Illumina Bacterial Genome Assembly Pipeline
+Here’s your document converted into a clear, structured **Markdown (MD)** format:
 
-I've created several of workflows, conatining a comprehensive Snakemake pipeline for hybrid bacterial genome assembly using both Nanopore and Illumina data, direct RNA sequencing, and long read RNA-Seq analysis for cancer genomics(1. align, identify, and quantify full-length transcripts; 2. Splicing events detection; 3. Structural variant analysis; 4. Allele-specific expression. ). 
+---
 
-Pipeline Components
-Snakefile - Contains the complete workflow with the following steps:
+# **Genomics Workflows Documentation**
 
-Quality control for both Nanopore (NanoPlot, Filtlong) and Illumina (fastp) reads
-   Nanopore reads: Quality assessment with NanoPlot and filtering with Filtlong
-   Illumina reads: Quality control and adapter trimming with fastp
-Initial assembly with Flye using Nanopore long reads
-First polishing round with Pilon using Illumina reads to correct base errors
-Second polishing with Racon and Medaka using Nanopore reads for structural improvements
-Quality assessment with QUAST and BUSCO
-   Assembly statistics with QUAST
-   Genome completeness assessment with BUSCO
+## **1. Hybrid Nanopore-Illumina Bacterial Genome Assembly**
 
-Software Requirements
-Snakemake (v7.0.0+)
-Python (v3.8+)
-NanoPlot
-Filtlong
-fastp
-Flye
-BWA
-Samtools
-Pilon
-Minimap2
-Racon
-Medaka
-QUAST
-BUSCO
+### **Pipeline Overview**
+A Snakemake pipeline for hybrid assembly using long (Nanopore) and short (Illumina) reads.
 
-Configuration File - Customizable YAML file to specify:
+#### **Key Steps**
+1. **Quality Control**  
+   - **Nanopore**: `NanoPlot` (QC) → `Filtlong` (filtering)  
+   - **Illumina**: `fastp` (adapter trimming + QC)  
 
-Sample information (Nanopore and Illumina read paths)
-Estimated genome size
-BUSCO lineage for your specific bacterial species
-Resource allocation parameters
+2. **Assembly & Polishing**  
+   - **Initial Assembly**: `Flye` (long-read assembly)  
+   - **Polishing**:  
+     - Illumina: `Pilon` (error correction)  
+     - Nanopore: `Racon` + `Medaka` (structural refinement)  
 
-Key Features
+3. **Quality Assessment**  
+   - `QUAST` (assembly metrics)  
+   - `BUSCO` (completeness)  
 
-Modularity: Each step is isolated, making it easy to restart from any point if a step fails
-Scalability: Works with multiple samples in parallel
-Resource Management: Configurable thread allocation for each step
-Comprehensive QC: Quality reports at multiple stages to monitor assembly improvement
+#### **Software Requirements**
+```plaintext
+Snakemake (v7.0+), Python (v3.8+), NanoPlot, Filtlong, fastp, Flye,  
+BWA, Samtools, Pilon, Minimap2, Racon, Medaka, QUAST, BUSCO
+```
 
+#### **Configuration (`config.yaml`)**
+```yaml
+samples:
+  sample1:
+    nanopore: "path/to/nanopore.fastq"
+    illumina: ["path/to/illumina_R1.fastq", "path/to/illumina_R2.fastq"]
+genome_size: "5m"  # Estimated genome size
+busco_lineage: "bacteria_odb10"
+threads: 16
+```
 
-Direct RNA sequencing is an advanced technology that allows scientists to sequence RNA molecules directly without converting them to cDNA first. This approach is particularly valuable for identifying post-transcriptional modifications on ribosomal RNA (rRNA), which can serve as biomarkers for tissue types and disease states like cancer.
-The process works through several key mechanisms:
+---
 
-Direct sequencing captures RNA modifications in their native state by analyzing changes in electrical signals as RNA passes through nanopores, allowing detection of methylation and other chemical modifications.
-rRNA molecules contain numerous modification sites that vary between different tissue types and can be altered in cancer cells, creating unique "fingerprints."
-These modification patterns are analyzed using machine learning algorithms that identify tissue-specific and cancer-associated signatures.
-The technology can distinguish normal from cancerous tissue based on consistent differences in modification patterns, potentially enabling early cancer detection from liquid biopsies.
+## **2. Direct RNA Sequencing for Cancer Biomarkers**
 
+### **Workflow Highlights**
+- **Technology**: Nanopore direct RNA-seq (native RNA, no cDNA conversion).  
+- **Applications**:  
+  - Detect rRNA modifications (e.g., m6A, m5C) as cancer biomarkers.  
+  - Tissue-specific "fingerprinting" via modification patterns.  
 
+#### **Analysis Steps**
+1. **Basecalling**: `Guppy` (modification-aware).  
+2. **Mod Detection**: `Tombo` (signal analysis) → `Nanopolish` (event alignment).  
+3. **Machine Learning**:  
+   - Train classifiers to distinguish cancer vs. normal tissues.  
 
+---
 
+## **3. Long-Read RNA-Seq in Cancer Genomics**
 
+### **Four Core Modules**
+| **Module**               | **Tools**            | **Output**                          |
+|--------------------------|----------------------|-------------------------------------|
+| **Transcript Isoforms**  | FLAMES, StringTie2   | Full-length transcript quantification |
+| **Splicing Analysis**    | SUPPA2, rMATS        | Tumor-specific splice junctions     |
+| **Fusion Detection**     | Arriba, STAR-Fusion  | Gene fusions (e.g., EGFR-SEPT14)    |
+| **Allele-Specific Exp.** | ASEP, Nanopore-Phasing | Allelic imbalance (e.g., TP53)     |
+
+### **1. Setup**
+```bash
+conda env create -f envs/nanopore.yaml
+snakemake --cores 32 --use-conda
+```
+
+### **2. Outputs**
+- **Reports**: `MultiQC` (aggregates QC stats).  
+- **Visualization**: `IGV` (validate fusions/isoforms).  
+
+---
+
+## **Key Advantages**
+- **Reproducible**: Version-controlled via Conda/Snakemake.  
+- **Scalable**: Parallel execution for multi-sample projects.  
+- **Comprehensive**: QC at every step (raw reads → clinical insights).  
+
+---
+
+### **Need Further Customization?**
+- For **publications**: I can provide LaTeX-ready methods text.  
+
+Let me know if you'd like to refine any section!
