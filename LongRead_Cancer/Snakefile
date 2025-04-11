@@ -1,0 +1,27 @@
+configfile: "config.yaml"
+
+# Define samples and types from config
+SAMPLES = list(config["samples"].keys())
+TYPES = list(set([config["samples"][sample]["type"] for sample in SAMPLES]))
+
+# Define the final target rule
+rule all:
+    input:
+        qc_report = config["output"]["qc_dir"] + "/qc_report.html",
+        transcript_report = config["output"]["transcript_dir"] + "/transcript_summary.html",
+        splicing_report = config["output"]["splicing_dir"] + "/splicing_analysis.html",
+        fusion_report = config["output"]["fusion_dir"] + "/fusion_detection.html",
+        ase_report = config["output"]["ase_dir"] + "/ase_analysis.html",
+        clinical_report = config["output"]["clinical_dir"] + "/clinical_integration.html",
+        multiqc_report = config["output"]["qc_dir"] + "/multiqc_report.html"
+
+# Include rules from separate files
+include: "rules/alignment.smk"
+include: "rules/qc.smk"
+include: "rules/transcripts.smk"
+include: "rules/splicing.smk"
+include: "rules/fusion.smk"
+include: "rules/ase.smk"
+include: "rules/clinical.smk"
+include: "rules/reporting.smk"
+

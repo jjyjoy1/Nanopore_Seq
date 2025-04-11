@@ -1,0 +1,116 @@
+```R
+---
+title: "Transcript Analysis Report"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(DT)
+library(dplyr)
+library(ggplot2)
+library(pheatmap)
+
+# Load data files
+differential_file <- snakemake@input[["differential"]]
+novel_file <- snakemake@input[["novel"]]
+summary_file <- snakemake@input[["summary"]]
+
+# Read differential isoforms
+diff_isoforms <- read.csv(differential_file)
+
+# Read novel isoforms
+novel_isoforms <- read.csv(novel_file)
+
+# Read summary information
+summary_text <- readLines(summary_file)
+
+cat(paste(summary_text, collapse = "\n"))
+
+if (nrow(diff_isoforms) > 0) {
+  # Format p-values
+  diff_isoforms$p_value_formatted <- format.pval(diff_isoforms$pvalue, digits = 3)
+  
+  # Show top differentially used isoforms
+  DT::datatable(
+    diff_isoforms %>% 
+      select(gene_id, transcript_id, dIF, p_value_formatted) %>%
+      rename(
+        "Gene ID" = gene_id,
+        "Transcript ID" = transcript_id,
+        "Delta IF" = dIF,
+        "P-value" = p_value_formatted
+      ),
+    caption = "Differential Isoform Usage",
+    options = list(pageLength = 10),
+    rownames = FALSE
+  )
+  
+  # Plot top genes with differential isoform usage
+  top_genes <- diff_isoforms %>%
+    group_by(gene_id) %>%
+    summarize(max_dIF = max(abs(dIF)), min_pval = min(pvalue)) %>%
+    arrange(min_pval) %>%
+    head(10) %>%
+    pull(gene_id)
+  
+  # Get isoforms for top genes
+  top_gene_isoforms <- diff_isoforms %>%
+    filter(gene_id %in% top_genes)
+  
+  # Create visualization
+  ggplot(top_gene_isoforms, aes(x = gene_id, y = dIF, color = ifelse(dIF > 0, "Up in Tumor", "Up in Normal"))) +
+    geom_point(size = 3) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_color_manual(values = c("Up in Tumor" = "red", "Up in Normal" = "blue")) +
+    labs(title = "Differential Isoform Usage for Top Genes", 
+         x = "Gene", 
+         y = "Delta Isoform Fraction (Tumor - Normal)",
+         color = "Direction") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+} else {
+  cat("No significant differential isoform usage detected.")
+}
+
+
+if (nrow(novel_isoforms) > 0) {
+  # Show top novel isoforms
+  DT::datatable(
+    novel_isoforms %>% 
+      select(gene_id, transcript_id, structural_category, sample_count) %>%
+      rename(
+        "Gene ID" = gene_id,
+        "Transcript ID" = transcript_id,
+        "Category" = structural_category,
+        "Samples" = sample_count
+      ),
+    caption = "Novel Transcript Isoforms",
+    options = list(pageLength = 10),
+    rownames = FALSE
+  )
+  
+  # Plot distribution of novel isoform categories
+  if ("structural_category" %in% colnames(novel_isoforms)) {
+    ggplot(novel_isoforms, aes(x = structural_category, fill = structural_category)) +
+      geom_bar() +
+      labs(title = "Distribution of Novel Isoform Categories", 
+           x = "Category", 
+           y = "Count") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  }
+} else {
+  cat("No novel transcript isoforms detected.")
+}
+
+
+
+
+
+
+
+
+

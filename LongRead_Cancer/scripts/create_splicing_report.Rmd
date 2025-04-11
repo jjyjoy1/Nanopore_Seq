@@ -1,0 +1,106 @@
+```R
+---
+title: "Splicing Analysis Report"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(DT)
+library(dplyr)
+library(ggplot2)
+
+# Load data files
+tumor_specific_file <- snakemake@input[["tumor_specific"]]
+differential_file <- snakemake@input[["differential"]]
+plots_dir <- snakemake@input[["plots_dir"]]
+
+# Read tumor-specific junctions
+tumor_specific <- read.csv(tumor_specific_file)
+
+# Read differential junctions
+differential <- read.csv(differential_file)
+
+# Calculate summary statistics
+num_tumor_specific <- nrow(tumor_specific)
+num_differential <- nrow(differential)
+
+cat(sprintf("Total tumor-specific splice junctions: %d\n", num_tumor_specific))
+cat(sprintf("Total differential splice junctions: %d\n", num_differential))
+
+if (nrow(tumor_specific) > 0) {
+  # Show top tumor-specific junctions
+  DT::datatable(
+    tumor_specific %>% 
+      arrange(desc(read_count)) %>%
+      head(50) %>%
+      select(junction_id, chrom, start, end, read_count) %>%
+      rename(
+        "Junction ID" = junction_id,
+        "Chromosome" = chrom,
+        "Start" = start,
+        "End" = end,
+        "Read Count" = read_count
+      ),
+    caption = "Tumor-Specific Splice Junctions",
+    options = list(pageLength = 10),
+    rownames = FALSE
+  )
+  
+  # Include plot image if available
+  if (file.exists(file.path(plots_dir, "top_tumor_specific_junctions.png"))) {
+    knitr::include_graphics(file.path(plots_dir, "top_tumor_specific_junctions.png"))
+  }
+} else {
+  cat("No tumor-specific splice junctions detected.")
+}
+
+
+if (nrow(differential) > 0) {
+  # Show top differential junctions
+  DT::datatable(
+    differential %>% 
+      arrange(desc(abs(log2_fold_change))) %>%
+      head(50) %>%
+      select(junction_id, tumor_count, normal_count, fold_change, log2_fold_change) %>%
+      rename(
+        "Junction ID" = junction_id,
+        "Tumor Count" = tumor_count,
+        "Normal Count" = normal_count,
+        "Fold Change" = fold_change,
+        "Log2 Fold Change" = log2_fold_change
+      ),
+    caption = "Differential Splice Junctions",
+    options = list(pageLength = 10),
+    rownames = FALSE
+  )
+  
+  # Include plot images if available
+  if (file.exists(file.path(plots_dir, "junction_usage_comparison.png"))) {
+    knitr::include_graphics(file.path(plots_dir, "junction_usage_comparison.png"))
+  }
+  
+  if (file.exists(file.path(plots_dir, "junction_fold_change_distribution.png"))) {
+    knitr::include_graphics(file.path(plots_dir, "junction_fold_change_distribution.png"))
+  }
+} else {
+  cat("No differential splice junctions detected.")
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,146 @@
+# Load required libraries
+library(knitr)
+library(DT)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# Load data files
+ase_files <- snakemake@input[["ase_results"]]
+plots_dirs <- snakemake@input[["plots_dir"]]
+
+# Read ASE results from all samples
+ase_data_list <- list()
+
+for (file in ase_files) {
+  # Extract sample ID from filename
+  sample_id <- gsub("_ase_results\\.csv$", "", basename(file))
+  
+  # Read data
+  ase_data <- read.csv(file)
+  
+  if (nrow(ase_data) > 0) {
+    # Add sample ID
+    ase_data$sample_id <- sample_id
+    
+    ase_data_list[[length(ase_data_list) + 1]] <- ase_data
+  }
+}
+
+# Combine all samples
+if (length(ase_data_list) > 0) {
+  all_ase_data <- bind_rows(ase_data_list)
+} else {
+  all_ase_data <- data.frame()
+}
+
+if (nrow(all_ase_data) > 0) {
+  # Calculate summary statistics
+  total_genes_analyzed <- length(unique(all_ase_data$gene_id))
+  total_samples <- length(unique(all_ase_data$sample_id))
+  
+  # Define significant ASE threshold (typical value is 0.3)
+  ase_threshold <- 0.3
+  
+  # Count genes with significant ASE
+  sig_ase_genes <- all_ase_data %>%
+    filter(!is.na(ase_score) & ase_score >= ase_threshold) %>%
+    group_by(gene_id) %>%
+    summarize(samples_with_ase = n(),
+              avg_ase_score = mean(ase_score, na.rm = TRUE)) %>%
+    filter(samples_with_ase > 0)
+  
+  cat(sprintf("Total genes analyzed: %d\n", total_genes_analyzed))
+  cat(sprintf("Total samples: %d\n", total_samples))
+  cat(sprintf("Genes with significant allele-specific expression (ASE score ≥ %.1f): %d\n", 
+              ase_threshold, nrow(sig_ase_genes)))
+  
+  # Include summary plot if available
+  for (plots_dir in plots_dirs) {
+    if (file.exists(file.path(plots_dir, "ase_scores_summary.png"))) {
+      knitr::include_graphics(file.path(plots_dir, "ase_scores_summary.png"))
+      break
+    }
+  }
+} else {
+  cat("No allele-specific expression data available.")
+}
+
+if (nrow(all_ase_data) > 0) {
+  # Get genes with significant ASE
+  ase_threshold <- 0.3
+  
+  sig_ase_genes <- all_ase_data %>%
+    filter(!is.na(ase_score) & ase_score >= ase_threshold) %>%
+    group_by(gene_id) %>%
+    summarize(samples_with_ase = n(),
+              avg_ase_score = mean(ase_score, na.rm = TRUE),
+              max_ase_score = max(ase_score, na.rm = TRUE)) %>%
+    arrange(desc(avg_ase_score))
+  
+  if (nrow(sig_ase_genes) > 0) {
+    # Show significant ASE genes
+    DT::datatable(
+      sig_ase_genes %>%
+        rename(
+          "Gene ID" = gene_id,
+          "Samples with ASE" = samples_with_ase,
+          "Average ASE Score" = avg_ase_score,
+          "Maximum ASE Score" = max_ase_score
+        ),
+      caption = "Genes with Significant Allele-Specific Expression",
+      options = list(pageLength = 10),
+      rownames = FALSE
+    )
+    
+    # Plot top ASE genes
+    ggplot(head(sig_ase_genes, 20), 
+           aes(x = reorder(gene_id, avg_ase_score), y = avg_ase_score, fill = avg_ase_score)) +
+      geom_bar(stat = "identity") +
+      geom_hline(yintercept = ase_threshold, linetype = "dashed", color = "red") +
+      scale_fill_gradient(low = "lightblue", high = "darkblue") +
+      labs(title = "Top Genes with Allele-Specific Expression", 
+           x = "Gene", 
+           y = "Average ASE Score") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  } else {
+    cat("No genes with significant allele-specific expression detected.")
+  }
+} else {
+  cat("No allele-specific expression data available.")
+}
+
+if (nrow(all_ase_data) > 0 && length(unique(all_ase_data$sample_id)) > 1) {
+  # Filter for genes with ASE in at least one sample
+  ase_threshold <- 0.3
+  
+  genes_with_ase <- all_ase_data %>%
+    filter(!is.na(ase_score) & ase_score >= ase_threshold) %>%
+    pull(gene_id) %>%
+    unique()
+  
+  if (length(genes_with_ase) > 0) {
+    # Create a matrix of ASE scores
+    ase_matrix <- all_ase_data %>%
+      filter(gene_id %in% genes_with_ase) %>%
+      select(gene_id, sample_id, ase_score) %>%
+      pivot_wider(names_from = sample_id, values_from = ase_score) %>%
+      column_to_rownames("gene_id")
+    
+    # Generate heatmap (limited to top 50 genes if more)
+    if (nrow(ase_matrix) > 50) {
+      # Get top 50 genes by average ASE score
+      top_genes <- all_ase_data %>%
+        filter(gene_id %in% genes_with_ase) %>%
+        group_by(gene_id) %>%
+        summarize(avg_score = mean(ase_score, na.rm = TRUE)) %>%
+        arrange(desc(avg_score)) %>%
+        head(50)
+    }
+  }
+}
+
+
+
+

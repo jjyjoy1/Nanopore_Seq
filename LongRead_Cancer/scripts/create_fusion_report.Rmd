@@ -1,0 +1,120 @@
+```R
+---
+title: "Fusion Transcript Analysis Report"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(DT)
+library(dplyr)
+library(ggplot2)
+
+
+# Load data files
+tumor_specific_file <- snakemake@input[["tumor_specific"]]
+plots_dir <- snakemake@input[["plots_dir"]]
+
+# Read tumor-specific fusions
+tumor_specific <- read.csv(tumor_specific_file)
+
+# Calculate summary statistics
+num_fusions <- nrow(tumor_specific)
+
+cat(sprintf("Total tumor-specific fusion candidates: %d\n", num_fusions))
+
+if (num_fusions > 0) {
+  # Calculate support statistics
+  min_support <- min(tumor_specific$supporting_reads)
+  max_support <- max(tumor_specific$supporting_reads)
+  avg_support <- mean(tumor_specific$supporting_reads)
+  
+  cat(sprintf("Minimum supporting reads: %d\n", min_support))
+  cat(sprintf("Maximum supporting reads: %d\n", max_support))
+  cat(sprintf("Average supporting reads: %.2f\n", avg_support))
+}
+
+if (nrow(tumor_specific) > 0) {
+  # Show top tumor-specific fusions
+  DT::datatable(
+    tumor_specific %>% 
+      arrange(desc(supporting_reads)) %>%
+      select(fusion_name, gene1_name, gene2_name, supporting_reads) %>%
+      rename(
+        "Fusion" = fusion_name,
+        "Gene 1" = gene1_name,
+        "Gene 2" = gene2_name,
+        "Supporting Reads" = supporting_reads
+      ),
+    caption = "Tumor-Specific Fusion Transcripts",
+    options = list(pageLength = 10),
+    rownames = FALSE
+  )
+  
+  # Include plot image if available
+  if (file.exists(file.path(plots_dir, "top_tumor_specific_fusions.png"))) {
+    knitr::include_graphics(file.path(plots_dir, "top_tumor_specific_fusions.png"))
+  }
+  
+  if (file.exists(file.path(plots_dir, "fusion_support_distribution.png"))) {
+    knitr::include_graphics(file.path(plots_dir, "fusion_support_distribution.png"))
+  }
+} else {
+  cat("No tumor-specific fusion transcripts detected.")
+}
+
+if (nrow(tumor_specific) > 0) {
+  # Analyze gene frequency in fusions
+  gene1_counts <- tumor_specific %>%
+    count(gene1_name) %>%
+    rename(gene_name = gene1_name, count = n)
+  
+  gene2_counts <- tumor_specific %>%
+    count(gene2_name) %>%
+    rename(gene_name = gene2_name, count = n)
+  
+  all_genes <- bind_rows(gene1_counts, gene2_counts) %>%
+    group_by(gene_name) %>%
+    summarize(total_fusions = sum(count)) %>%
+    arrange(desc(total_fusions)) %>%
+    filter(total_fusions > 1)
+  
+  # Show recurrent genes
+  if (nrow(all_genes) > 0) {
+    DT::datatable(
+      all_genes %>%
+        rename(
+          "Gene" = gene_name,
+          "Number of Fusions" = total_fusions
+        ),
+      caption = "Recurrent Fusion Gene Partners",
+      options = list(pageLength = 10),
+      rownames = FALSE
+    )
+    
+    # Create visualization
+    ggplot(head(all_genes, 15), aes(x = reorder(gene_name, total_fusions), y = total_fusions, fill = total_fusions)) +
+      geom_bar(stat = "identity") +
+      scale_fill_gradient(low = "lightblue", high = "darkblue") +
+      labs(title = "Top Recurrent Fusion Gene Partners", 
+           x = "Gene", 
+           y = "Number of Fusions") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  } else {
+    cat("No recurrent fusion gene partners detected.")
+  }
+} else {
+  cat("No fusion transcripts detected for recurrence analysis.")
+}
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,2409 @@
+return(NULL)
+  }
+}
+
+# Process fusion data
+process_fusions <- function(files) {
+  fusion_data_list <- list()
+  
+  for (file in files) {
+    # Extract sample ID from filename
+    sample_id <- gsub("_fusions\\.csv$", "", basename(file))
+    
+    # Read data
+    fusion_data <- read.csv(file)
+    
+    if (nrow(fusion_data) > 0) {
+      # Add sample ID
+      fusion_data$sample_id <- sample_id
+      
+      # Keep only the columns we need
+      fusion_data <- fusion_data %>%
+        select(sample_id, fusion_name, supporting_reads)
+      
+      fusion_data_list[[length(fusion_data_list) + 1]] <- fusion_data
+    }
+  }
+  
+  # Combine all samples
+  if (length(fusion_data_list) > 0) {
+    combined_fusions <- bind_rows(fusion_data_list)
+    
+    # Pivot to wide format for fusion counts
+    fusion_wide <- combined_fusions %>%
+      pivot_wider(names_from = fusion_name, 
+                  values_from = supporting_reads, 
+                  names_prefix = "fusion_")
+    
+    return(fusion_wide)
+  } else {
+    return(NULL)
+  }
+}
+
+# Process ASE data
+process_ase <- function(files) {
+  ase_data_list <- list()
+  
+  for (file in files) {
+    # Extract sample ID from filename
+    sample_id <- gsub("_ase_results\\.csv$", "", basename(file))
+    
+    # Read data
+    ase_data <- read.csv(file)
+    
+    if (nrow(ase_data) > 0) {
+      # Add sample ID
+      ase_data$sample_id <- sample_id
+      
+      # Keep only the columns we need
+      ase_data <- ase_data %>%
+        select(sample_id, gene_id, ase_score)
+      
+      ase_data_list[[length(ase_data_list) + 1]] <- ase_data
+    }
+  }
+  
+  # Combine all samples
+  if (length(ase_data_list) > 0) {
+    combined_ase <- bind_rows(ase_data_list)
+    
+    # Pivot to wide format for ASE scores
+    ase_wide <- combined_ase %>%
+      pivot_wider(names_from = gene_id, 
+                  values_from = ase_score, 
+                  names_prefix = "ase_")
+    
+    return(ase_wide)
+  } else {
+    return(NULL)
+  }
+}
+
+# Process data
+isoform_wide <- process_isoforms(isoform_files)
+junction_wide <- process_junctions(junction_files)
+fusion_wide <- process_fusions(fusion_files)
+ase_wide <- process_ase(ase_files)
+
+# Integrate with clinical data
+integrated_data <- clinical_data
+
+if (!is.null(isoform_wide)) {
+  integrated_data <- integrated_data %>%
+    left_join(isoform_wide, by = sample_id_col)
+}
+
+if (!is.null(junction_wide)) {
+  integrated_data <- integrated_data %>%
+    left_join(junction_wide, by = sample_id_col)
+}
+
+if (!is.null(fusion_wide)) {
+  integrated_data <- integrated_data %>%
+    left_join(fusion_wide, by = sample_id_col)
+}
+
+if (!is.null(ase_wide)) {
+  integrated_data <- integrated_data %>%
+    left_join(ase_wide, by = sample_id_col)
+}
+
+# Save integrated data
+write.csv(integrated_data, output_integrated, row.names = FALSE)
+
+# Perform survival analysis
+survival_results <- data.frame()
+
+# Check if clinical data has survival information
+if (outcome_col %in% colnames(clinical_data) && event_col %in% colnames(clinical_data)) {
+  # Create survival object
+  surv_obj <- Surv(time = integrated_data[[outcome_col]], event = integrated_data[[event_col]])
+  
+  # Analyze associations with isoforms
+  if (!is.null(isoform_wide)) {
+    iso_cols <- colnames(isoform_wide)[grepl("^iso_", colnames(isoform_wide))]
+    
+    for (col in iso_cols) {
+      # Skip if too many missing values
+      if (sum(is.na(integrated_data[[col]])) > nrow(integrated_data) * 0.3) {
+        next
+      }
+      
+      # Try Cox regression
+      tryCatch({
+        cox_model <- coxph(surv_obj ~ integrated_data[[col]])
+        
+        # Extract statistics
+        hr <- exp(coef(cox_model))
+        ci <- exp(confint(cox_model))
+        p_val <- summary(cox_model)$coefficients[5]
+        
+        # Add to results
+        result_row <- data.frame(
+          feature = col,
+          hazard_ratio = hr,
+          ci_lower = ci[1],
+          ci_upper = ci[2],
+          p_value = p_val
+        )
+        
+        survival_results <- rbind(survival_results, result_row)
+      }, error = function(e) {
+        # Skip if error
+      })
+    }
+  }
+  
+  # Create Kaplan-Meier plots for top significant features
+  if (nrow(survival_results) > 0) {
+    # Adjust p-values
+    survival_results$padj <- p.adjust(survival_results$p_value, method = "BH")
+    
+    # Sort by adjusted p-value
+    survival_results <- survival_results %>%
+      arrange(padj)
+    
+    # Create KM plots for top 5 significant features
+    top_features <- head(survival_results, 5)
+    
+    for (i in 1:nrow(top_features)) {
+      feature <- top_features$feature[i]
+      
+      # Create high/low groups based on median
+      threshold <- median(integrated_data[[feature]], na.rm = TRUE)
+      integrated_data$group <- ifelse(integrated_data[[feature]] > threshold, "High", "Low")
+      
+      # Create KM plot
+      km_fit <- survfit(surv_obj ~ group, data = integrated_data)
+      
+      # Plot
+      km_plot <- ggsurvplot(
+        km_fit,
+        data = integrated_data,
+        pval = TRUE,
+        risk.table = TRUE,
+        title = paste0("Survival by ", feature),
+        xlab = "Time (months)",
+        legend.labs = c("Low", "High"),
+        legend.title = feature,
+        palette = c("#2E9FDF", "#E7B800")
+      )
+      
+      # Save plot
+      pdf(file.path(plots_dir, paste0("survival_", gsub("[::]", "_", feature), ".pdf")), 
+          width = 10, height = 8)
+      print(km_plot)
+      dev.off()
+    }
+  }
+}
+
+# Save survival results
+write.csv(survival_results, output_survival, row.names = FALSE)
+
+# Create summary plot for survival associations
+if (nrow(survival_results) > 0) {
+  # Filter for significant results
+  sig_results <- survival_results %>%
+    filter(padj < 0.05) %>%
+    arrange(desc(abs(log(hazard_ratio))))
+  
+  if (nrow(sig_results) > 0) {
+    # Top 20 features
+    top_sig <- head(sig_results, 20)
+    
+    # Create forest plot
+    p <- ggplot(top_sig, aes(x = hazard_ratio, y = reorder(feature, hazard_ratio))) +
+      geom_point(size = 3) +
+      geom_errorbarh(aes(xmin = ci_lower, xmax = ci_upper), height = 0.2) +
+      geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+      scale_x_log10() +
+      labs(x = "Hazard Ratio (log scale)", y = "", title = "Survival Associations") +
+      theme_bw(base_size = 12) +
+      theme(axis.text.y = element_text(size = 10))
+    
+    # Save plot
+    ggsave(file.path(plots_dir, "survival_forest_plot.pdf"), p, width = 10, height = 8)
+  }
+}
+```
+
+### `scripts/create_transcript_report.Rmd`
+
+```R
+---
+title: "Transcript Analysis Report"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(DT)
+library(dplyr)
+library(ggplot2)
+library(pheatmap)
+```
+
+## Transcript Identification and Analysis Report
+
+This report summarizes the results of transcript identification and differential isoform usage analysis from long-read RNA-Seq data.
+
+```{r load-data}
+# Load data files
+differential_file <- snakemake@input[["differential"]]
+novel_file <- snakemake@input[["novel"]]
+summary_file <- snakemake@input[["summary"]]
+
+# Read differential isoforms
+diff_isoforms <- read.csv(differential_file)
+
+# Read novel isoforms
+novel_isoforms <- read.csv(novel_file)
+
+# Read summary information
+summary_text <- readLines(summary_file)
+```
+
+### Summary of Transcript Analysis
+
+```{r summary-text}
+cat(paste(summary_text, collapse = "\n"))
+```
+
+### Differential Isoform Usage
+
+The table below shows transcripts with significant differential usage between tumor and normal samples:
+
+```{r diff-isoforms}
+if (nrow(diff_isoforms) > 0) {
+  # Format p-values
+  diff_isoforms$p_value_formatted <- format.pval(diff_isoforms$pvalue, digits = 3)
+  
+  # Show top differentially used isoforms
+  DT::datatable(
+    diff_isoforms %>% 
+      select(gene_id, transcript_id, dIF, p_value_formatted) %>%
+      rename(
+        "Gene ID" = gene_id,
+        "Transcript ID" = transcript_id,
+        "Delta IF" = dIF,
+        "P-value" = p_value_formatted
+      ),
+    caption = "Differential Isoform Usage",
+    options = list(pageLength = 10),
+    rownames = FALSE
+  )
+  
+  # Plot top genes with differential isoform usage
+  top_genes <- diff_isoforms %>%
+    group_by(gene_id) %>%
+    summarize(max_dIF = max(abs(dIF)), min_pval = min(pvalue)) %>%
+    arrange(min_pval) %>%
+    head(10) %>%
+    pull(gene_id)
+  
+  # Get isoforms for top genes
+  top_gene_isoforms <- diff_isoforms %>%
+    filter(gene_id %in% top_genes)
+  
+  # Create visualization
+  ggplot(top_gene_isoforms, aes(x = gene_id, y = dIF, color = ifelse(dIF > 0, "Up in Tumor", "Up in Normal"))) +
+    geom_point(size = 3) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_color_manual(values = c("Up in Tumor" = "red", "Up in Normal" = "blue")) +
+    labs(title = "Differential Isoform Usage for Top Genes", 
+         x = "Gene", 
+         y = "Delta Isoform Fraction (Tumor - Normal)",
+         color = "Direction") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+} else {
+  cat("No significant differential isoform usage detected.")
+}
+```
+
+### Novel Transcript Isoforms
+
+The table below shows novel transcript isoforms identified in the samples:
+
+```{r novel-isoforms}
+if (nrow(novel_isoforms) > 0) {
+  # Show top novel isoforms
+  DT::datatable(
+    novel_isoforms %>% 
+      select(gene_id, transcript_id, structural_category, sample_count) %>%
+      rename(
+        "Gene ID" = gene_id,
+        "Transcript ID" = transcript_id,
+        "Category" = structural_category,
+        "Samples" = sample_count
+      ),
+    caption = "Novel Transcript Isoforms",
+    options = list(pageLength = 10),
+    rownames = FALSE
+  )
+  
+  # Plot distribution of novel isoform categories
+  if ("structural_category" %in% colnames(novel_isoforms)) {
+    ggplot(novel_isoforms, aes(x = structural_category, fill = structural_category)) +
+      geom_bar() +
+      labs(title = "Distribution of Novel Isoform Categories", 
+           x = "Category", 
+           y = "Count") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  }
+} else {
+  cat("No novel transcript isoforms detected.")
+}
+```
+
+## Conclusion
+
+This report provides an overview of the transcript identification and differential isoform analysis. The long-read RNA-Seq data has enabled the detection of full-length transcripts, including novel isoforms and those with differential usage between tumor and normal samples.
+```
+
+### `scripts/create_splicing_report.Rmd`
+
+```R
+---
+title: "Splicing Analysis Report"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(DT)
+library(dplyr)
+library(ggplot2)
+```
+
+## Splicing Analysis Report
+
+This report summarizes the results of splicing analysis from long-read RNA-Seq data, focusing on tumor-specific and differentially used splice junctions.
+
+```{r load-data}
+# Load data files
+tumor_specific_file <- snakemake@input[["tumor_specific"]]
+differential_file <- snakemake@input[["differential"]]
+plots_dir <- snakemake@input[["plots_dir"]]
+
+# Read tumor-specific junctions
+tumor_specific <- read.csv(tumor_specific_file)
+
+# Read differential junctions
+differential <- read.csv(differential_file)
+```
+
+### Summary of Splicing Analysis
+
+```{r summary}
+# Calculate summary statistics
+num_tumor_specific <- nrow(tumor_specific)
+num_differential <- nrow(differential)
+
+cat(sprintf("Total tumor-specific splice junctions: %d\n", num_tumor_specific))
+cat(sprintf("Total differential splice junctions: %d\n", num_differential))
+```
+
+### Tumor-Specific Splice Junctions
+
+The table below shows splice junctions that are specific to tumor samples:
+
+```{r tumor-specific}
+if (nrow(tumor_specific) > 0) {
+  # Show top tumor-specific junctions
+  DT::datatable(
+    tumor_specific %>% 
+      arrange(desc(read_count)) %>%
+      head(50) %>%
+      select(junction_id, chrom, start, end, read_count) %>%
+      rename(
+        "Junction ID" = junction_id,
+        "Chromosome" = chrom,
+        "Start" = start,
+        "End" = end,
+        "Read Count" = read_count
+      ),
+    caption = "Tumor-Specific Splice Junctions",
+    options = list(pageLength = 10),
+    rownames = FALSE
+  )
+  
+  # Include plot image if available
+  if (file.exists(file.path(plots_dir, "top_tumor_specific_junctions.png"))) {
+    knitr::include_graphics(file.path(plots_dir, "top_tumor_specific_junctions.png"))
+  }
+} else {
+  cat("No tumor-specific splice junctions detected.")
+}
+```
+
+### Differential Splice Junction Usage
+
+The table below shows splice junctions with differential usage between tumor and normal samples:
+
+```{r differential}
+if (nrow(differential) > 0) {
+  # Show top differential junctions
+  DT::datatable(
+    differential %>% 
+      arrange(desc(abs(log2_fold_change))) %>%
+      head(50) %>%
+      select(junction_id, tumor_count, normal_count, fold_change, log2_fold_change) %>%
+      rename(
+        "Junction ID" = junction_id,
+        "Tumor Count" = tumor_count,
+        "Normal Count" = normal_count,
+        "Fold Change" = fold_change,
+        "Log2 Fold Change" = log2_fold_change
+      ),
+    caption = "Differential Splice Junctions",
+    options = list(pageLength = 10),
+    rownames = FALSE
+  )
+  
+  # Include plot images if available
+  if (file.exists(file.path(plots_dir, "junction_usage_comparison.png"))) {
+    knitr::include_graphics(file.path(plots_dir, "junction_usage_comparison.png"))
+  }
+  
+  if (file.exists(file.path(plots_dir, "junction_fold_change_distribution.png"))) {
+    knitr::include_graphics(file.path(plots_dir, "junction_fold_change_distribution.png"))
+  }
+} else {
+  cat("No differential splice junctions detected.")
+}
+```
+
+## Biological Interpretation
+
+Splice junctions represent the boundaries between exons in mature mRNA transcripts. Changes in splicing patterns can lead to altered protein isoforms with potentially different functions. Tumor-specific splice junctions may indicate:
+
+1. Novel exon inclusion or skipping events
+2. Alternative donor or acceptor site usage
+3. Intron retention
+4. Exon shuffling
+
+These splicing alterations can contribute to cancer progression by modifying protein function, creating novel oncogenic isoforms, or disrupting tumor suppressor activity.
+
+## Conclusion
+
+This report highlights the splicing alterations detected between tumor and normal samples using long-read RNA-Seq data. The ability to sequence full-length transcripts provides a comprehensive view of alternative splicing events that may contribute to cancer biology and could potentially serve as biomarkers or therapeutic targets.
+```
+
+### `scripts/create_fusion_report.Rmd`
+
+```R
+---
+title: "Fusion Transcript Analysis Report"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(DT)
+library(dplyr)
+library(ggplot2)
+```
+
+## Fusion Transcript Analysis Report
+
+This report summarizes the results of fusion transcript detection from long-read RNA-Seq data, focusing on tumor-specific fusion events.
+
+```{r load-data}
+# Load data files
+tumor_specific_file <- snakemake@input[["tumor_specific"]]
+plots_dir <- snakemake@input[["plots_dir"]]
+
+# Read tumor-specific fusions
+tumor_specific <- read.csv(tumor_specific_file)
+```
+
+### Summary of Fusion Analysis
+
+```{r summary}
+# Calculate summary statistics
+num_fusions <- nrow(tumor_specific)
+
+cat(sprintf("Total tumor-specific fusion candidates: %d\n", num_fusions))
+
+if (num_fusions > 0) {
+  # Calculate support statistics
+  min_support <- min(tumor_specific$supporting_reads)
+  max_support <- max(tumor_specific$supporting_reads)
+  avg_support <- mean(tumor_specific$supporting_reads)
+  
+  cat(sprintf("Minimum supporting reads: %d\n", min_support))
+  cat(sprintf("Maximum supporting reads: %d\n", max_support))
+  cat(sprintf("Average supporting reads: %.2f\n", avg_support))
+}
+```
+
+### Tumor-Specific Fusion Transcripts
+
+The table below shows fusion transcripts that are specific to tumor samples:
+
+```{r tumor-specific}
+if (nrow(tumor_specific) > 0) {
+  # Show top tumor-specific fusions
+  DT::datatable(
+    tumor_specific %>% 
+      arrange(desc(supporting_reads)) %>%
+      select(fusion_name, gene1_name, gene2_name, supporting_reads) %>%
+      rename(
+        "Fusion" = fusion_name,
+        "Gene 1" = gene1_name,
+        "Gene 2" = gene2_name,
+        "Supporting Reads" = supporting_reads
+      ),
+    caption = "Tumor-Specific Fusion Transcripts",
+    options = list(pageLength = 10),
+    rownames = FALSE
+  )
+  
+  # Include plot image if available
+  if (file.exists(file.path(plots_dir, "top_tumor_specific_fusions.png"))) {
+    knitr::include_graphics(file.path(plots_dir, "top_tumor_specific_fusions.png"))
+  }
+  
+  if (file.exists(file.path(plots_dir, "fusion_support_distribution.png"))) {
+    knitr::include_graphics(file.path(plots_dir, "fusion_support_distribution.png"))
+  }
+} else {
+  cat("No tumor-specific fusion transcripts detected.")
+}
+```
+
+### Recurrent Gene Partners
+
+The table below shows genes that appear in multiple fusion events:
+
+```{r recurrent-genes}
+if (nrow(tumor_specific) > 0) {
+  # Analyze gene frequency in fusions
+  gene1_counts <- tumor_specific %>%
+    count(gene1_name) %>%
+    rename(gene_name = gene1_name, count = n)
+  
+  gene2_counts <- tumor_specific %>%
+    count(gene2_name) %>%
+    rename(gene_name = gene2_name, count = n)
+  
+  all_genes <- bind_rows(gene1_counts, gene2_counts) %>%
+    group_by(gene_name) %>%
+    summarize(total_fusions = sum(count)) %>%
+    arrange(desc(total_fusions)) %>%
+    filter(total_fusions > 1)
+  
+  # Show recurrent genes
+  if (nrow(all_genes) > 0) {
+    DT::datatable(
+      all_genes %>%
+        rename(
+          "Gene" = gene_name,
+          "Number of Fusions" = total_fusions
+        ),
+      caption = "Recurrent Fusion Gene Partners",
+      options = list(pageLength = 10),
+      rownames = FALSE
+    )
+    
+    # Create visualization
+    ggplot(head(all_genes, 15), aes(x = reorder(gene_name, total_fusions), y = total_fusions, fill = total_fusions)) +
+      geom_bar(stat = "identity") +
+      scale_fill_gradient(low = "lightblue", high = "darkblue") +
+      labs(title = "Top Recurrent Fusion Gene Partners", 
+           x = "Gene", 
+           y = "Number of Fusions") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  } else {
+    cat("No recurrent fusion gene partners detected.")
+  }
+} else {
+  cat("No fusion transcripts detected for recurrence analysis.")
+}
+```
+
+## Biological Interpretation
+
+Fusion transcripts result from genomic rearrangements or transcription-mediated events that join two previously separate genes. In cancer, fusion events can:
+
+1. Create oncogenic fusion proteins with novel or enhanced activity
+2. Disrupt tumor suppressor genes
+3. Place oncogenes under the control of more active promoters
+4. Generate chimeric transcripts with altered stability or localization
+
+Long-read sequencing enables direct detection of full-length fusion transcripts, avoiding the ambiguity often associated with short-read approaches.
+
+## Conclusion
+
+This report highlights the fusion transcripts detected in tumor samples using long-read RNA-Seq data. These findings provide insights into potential driver events in the cancer samples and may suggest new therapeutic targets or biomarkers.
+```
+
+### `scripts/create_ase_report.Rmd`
+
+```R
+---
+title: "Allele-Specific Expression Analysis Report"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(DT)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+```
+
+## Allele-Specific Expression Analysis Report
+
+This report summarizes the results of allele-specific expression (ASE) analysis from long-read RNA-Seq data, focusing on genes showing imbalanced expression between alleles in tumor samples.
+
+```{r load-data}
+# Load data files
+ase_files <- snakemake@input[["ase_results"]]
+plots_dirs <- snakemake@input[["plots_dir"]]
+
+# Read ASE results from all samples
+ase_data_list <- list()
+
+for (file in ase_files) {
+  # Extract sample ID from filename
+  sample_id <- gsub("_ase_results\\.csv$", "", basename(file))
+  
+  # Read data
+  ase_data <- read.csv(file)
+  
+  if (nrow(ase_data) > 0) {
+    # Add sample ID
+    ase_data$sample_id <- sample_id
+    
+    ase_data_list[[length(ase_data_list) + 1]] <- ase_data
+  }
+}
+
+# Combine all samples
+if (length(ase_data_list) > 0) {
+  all_ase_data <- bind_rows(ase_data_list)
+} else {
+  all_ase_data <- data.frame()
+}
+```
+
+### Summary of Allele-Specific Expression Analysis
+
+```{r summary}
+if (nrow(all_ase_data) > 0) {
+  # Calculate summary statistics
+  total_genes_analyzed <- length(unique(all_ase_data$gene_id))
+  total_samples <- length(unique(all_ase_data$sample_id))
+  
+  # Define significant ASE threshold (typical value is 0.3)
+  ase_threshold <- 0.3
+  
+  # Count genes with significant ASE
+  sig_ase_genes <- all_ase_data %>%
+    filter(!is.na(ase_score) & ase_score >= ase_threshold) %>%
+    group_by(gene_id) %>%
+    summarize(samples_with_ase = n(),
+              avg_ase_score = mean(ase_score, na.rm = TRUE)) %>%
+    filter(samples_with_ase > 0)
+  
+  cat(sprintf("Total genes analyzed: %d\n", total_genes_analyzed))
+  cat(sprintf("Total samples: %d\n", total_samples))
+  cat(sprintf("Genes with significant allele-specific expression (ASE score ≥ %.1f): %d\n", 
+              ase_threshold, nrow(sig_ase_genes)))
+  
+  # Include summary plot if available
+  for (plots_dir in plots_dirs) {
+    if (file.exists(file.path(plots_dir, "ase_scores_summary.png"))) {
+      knitr::include_graphics(file.path(plots_dir, "ase_scores_summary.png"))
+      break
+    }
+  }
+} else {
+  cat("No allele-specific expression data available.")
+}
+```
+
+### Genes with Significant Allele-Specific Expression
+
+The table below shows genes with significant allele-specific expression across samples:
+
+```{r sig-ase}
+if (nrow(all_ase_data) > 0) {
+  # Get genes with significant ASE
+  ase_threshold <- 0.3
+  
+  sig_ase_genes <- all_ase_data %>%
+    filter(!is.na(ase_score) & ase_score >= ase_threshold) %>%
+    group_by(gene_id) %>%
+    summarize(samples_with_ase = n(),
+              avg_ase_score = mean(ase_score, na.rm = TRUE),
+              max_ase_score = max(ase_score, na.rm = TRUE)) %>%
+    arrange(desc(avg_ase_score))
+  
+  if (nrow(sig_ase_genes) > 0) {
+    # Show significant ASE genes
+    DT::datatable(
+      sig_ase_genes %>%
+        rename(
+          "Gene ID" = gene_id,
+          "Samples with ASE" = samples_with_ase,
+          "Average ASE Score" = avg_ase_score,
+          "Maximum ASE Score" = max_ase_score
+        ),
+      caption = "Genes with Significant Allele-Specific Expression",
+      options = list(pageLength = 10),
+      rownames = FALSE
+    )
+    
+    # Plot top ASE genes
+    ggplot(head(sig_ase_genes, 20), 
+           aes(x = reorder(gene_id, avg_ase_score), y = avg_ase_score, fill = avg_ase_score)) +
+      geom_bar(stat = "identity") +
+      geom_hline(yintercept = ase_threshold, linetype = "dashed", color = "red") +
+      scale_fill_gradient(low = "lightblue", high = "darkblue") +
+      labs(title = "Top Genes with Allele-Specific Expression", 
+           x = "Gene", 
+           y = "Average ASE Score") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  } else {
+    cat("No genes with significant allele-specific expression detected.")
+  }
+} else {
+  cat("No allele-specific expression data available.")
+}
+```
+
+### Allele-Specific Expression by Sample
+
+The heatmap below shows the distribution of ASE scores across genes and samples:
+
+```{r ase-heatmap}
+if (nrow(all_ase_data) > 0 && length(unique(all_ase_data$sample_id)) > 1) {
+  # Filter for genes with ASE in at least one sample
+  ase_threshold <- 0.3
+  
+  genes_with_ase <- all_ase_data %>%
+    filter(!is.na(ase_score) & ase_score >= ase_threshold) %>%
+    pull(gene_id) %>%
+    unique()
+  
+  if (length(genes_with_ase) > 0) {
+    # Create a matrix of ASE scores
+    ase_matrix <- all_ase_data %>%
+      filter(gene_id %in% genes_with_ase) %>%
+      select(gene_id, sample_id, ase_score) %>%
+      pivot_wider(names_from = sample_id, values_from = ase_score) %>%
+      column_to_rownames("gene_id")
+    
+    # Generate heatmap (limited to top 50 genes if more)
+    if (nrow(ase_matrix) > 50) {
+      # Get top 50 genes by average ASE score
+      top_genes <- all_ase_data %>%
+        filter(gene_id %in% genes_with_ase) %>%
+        group_by(gene_id) %>%
+        summarize(avg_score = mean(ase_score, na.rm = TRUE)) %>%
+        arrange(desc(avg_score)) %>%
+        head(50) %>%# Long-Read RNA-Seq Snakemake Pipeline for Cancer Genomics
+
+This Snakemake pipeline implements the end-to-end analysis of long-read RNA sequencing data for cancer genomics, focusing on transcript isoform detection, splicing analysis, structural variant detection, and allele-specific expression.
+
+## Directory Structure
+
+```
+project/
+├── Snakefile
+├── config.yaml
+├── envs/
+│   ├── base.yaml
+│   ├── r_env.yaml
+│   └── vis_env.yaml
+├── scripts/
+│   ├── qc_metrics.py
+│   ├── transcript_identification.py
+│   ├── splice_analysis.py
+│   ├── fusion_detection.py
+│   ├── ase_analysis.py
+│   ├── visualization.py
+│   └── clinical_integration.R
+├── data/
+│   ├── raw/
+│   │   ├── tumor.fastq
+│   │   └── normal.fastq
+│   ├── reference/
+│   │   ├── genome.fa
+│   │   └── annotation.gtf
+│   └── clinical/
+│       └── clinical_data.csv
+└── results/
+    ├── qc/
+    ├── alignments/
+    ├── transcripts/
+    ├── splicing/
+    ├── fusions/
+    ├── ase/
+    ├── clinical/
+    └── plots/
+```
+
+## Installation
+
+1. Install Snakemake:
+```bash
+conda install -c bioconda -c conda-forge snakemake
+```
+
+2. Clone the repository:
+```bash
+git clone https://github.com/yourusername/long-read-rnaseq-cancer.git
+cd long-read-rnaseq-cancer
+```
+
+3. Create the conda environments:
+```bash
+cd envs/
+conda env create -f base.yaml
+conda env create -f r_env.yaml
+conda env create -f vis_env.yaml
+```
+
+## Configuration
+
+Edit the `config.yaml` file to specify your samples, paths, and parameters.
+
+## Running the Pipeline
+
+```bash
+snakemake --use-conda -j <cores> --configfile config.yaml
+```
+
+## Pipeline Overview
+
+1. Quality control of raw reads
+2. Alignment to reference genome
+3. Transcript identification and quantification
+4. Splicing analysis
+5. Fusion transcript detection
+6. Allele-specific expression analysis
+7. Integration with clinical data
+8. Visualization and reporting
+
+## File Contents
+
+### `config.yaml`
+
+```yaml
+# Sample information
+samples:
+  tumor_sample:
+    fastq: "data/raw/tumor.fastq"
+    type: "tumor"
+  normal_sample:
+    fastq: "data/raw/normal.fastq"
+    type: "normal"
+
+# Reference files
+reference:
+  genome: "data/reference/genome.fa"
+  annotation: "data/reference/annotation.gtf"
+  variants: "data/reference/variants.vcf"  # For ASE analysis
+
+# Clinical data
+clinical_data: "data/clinical/clinical_data.csv"
+
+# Output directories
+output:
+  base_dir: "results"
+  qc_dir: "results/qc"
+  align_dir: "results/alignments"
+  transcript_dir: "results/transcripts"
+  splicing_dir: "results/splicing"
+  fusion_dir: "results/fusions"
+  ase_dir: "results/ase"
+  clinical_dir: "results/clinical"
+  plot_dir: "results/plots"
+
+# Analysis parameters
+params:
+  alignment:
+    threads: 16
+    extra: "-uf -k14"
+  qc:
+    min_read_length: 500
+  transcripts:
+    min_coverage: 3
+  splicing:
+    min_support: 3
+  fusion:
+    min_support: 2
+  ase:
+    min_coverage: 10
+  clinical:
+    outcome_column: "survival_months"
+    event_column: "event"
+    sample_id_column: "sample_id"
+```
+
+### `Snakefile`
+
+```python
+configfile: "config.yaml"
+
+# Define samples and types from config
+SAMPLES = list(config["samples"].keys())
+TYPES = list(set([config["samples"][sample]["type"] for sample in SAMPLES]))
+
+# Define the final target rule
+rule all:
+    input:
+        qc_report = config["output"]["qc_dir"] + "/qc_report.html",
+        transcript_report = config["output"]["transcript_dir"] + "/transcript_summary.html",
+        splicing_report = config["output"]["splicing_dir"] + "/splicing_analysis.html",
+        fusion_report = config["output"]["fusion_dir"] + "/fusion_detection.html",
+        ase_report = config["output"]["ase_dir"] + "/ase_analysis.html",
+        clinical_report = config["output"]["clinical_dir"] + "/clinical_integration.html",
+        multiqc_report = config["output"]["qc_dir"] + "/multiqc_report.html"
+
+# Include rules from separate files
+include: "rules/alignment.smk"
+include: "rules/qc.smk"
+include: "rules/transcripts.smk"
+include: "rules/splicing.smk"
+include: "rules/fusion.smk"
+include: "rules/ase.smk"
+include: "rules/clinical.smk"
+include: "rules/reporting.smk"
+```
+
+### `rules/alignment.smk`
+
+```python
+rule align_reads:
+    input:
+        fastq = lambda wildcards: config["samples"][wildcards.sample]["fastq"],
+        reference = config["reference"]["genome"]
+    output:
+        bam = config["output"]["align_dir"] + "/{sample}.bam",
+        bai = config["output"]["align_dir"] + "/{sample}.bam.bai"
+    log:
+        config["output"]["align_dir"] + "/logs/{sample}_alignment.log"
+    conda:
+        "../envs/base.yaml"
+    threads: 
+        config["params"]["alignment"]["threads"]
+    shell:
+        """
+        # Align with minimap2 and pipe to samtools for sorting
+        minimap2 -ax splice:hq {config[params][alignment][extra]} \
+            -t {threads} {input.reference} {input.fastq} | \
+            samtools sort -@ {threads} -o {output.bam} \
+            2> {log}
+            
+        # Index the BAM file
+        samtools index {output.bam}
+        """
+```
+
+### `rules/qc.smk`
+
+```python
+rule qc_raw_reads:
+    input:
+        fastq = lambda wildcards: config["samples"][wildcards.sample]["fastq"]
+    output:
+        html = config["output"]["qc_dir"] + "/{sample}_nanoplot.html",
+        stats = config["output"]["qc_dir"] + "/{sample}_nanoplot_stats.txt"
+    log:
+        config["output"]["qc_dir"] + "/logs/{sample}_nanoplot.log"
+    conda:
+        "../envs/base.yaml"
+    shell:
+        """
+        NanoPlot --fastq {input.fastq} \
+            --outdir $(dirname {output.html}) \
+            --prefix {wildcards.sample}_nanoplot \
+            2> {log}
+        """
+
+rule qc_aligned_reads:
+    input:
+        bam = config["output"]["align_dir"] + "/{sample}.bam"
+    output:
+        metrics = config["output"]["qc_dir"] + "/{sample}_alignment_metrics.txt"
+    log:
+        config["output"]["qc_dir"] + "/logs/{sample}_alignment_qc.log"
+    conda:
+        "../envs/base.yaml"
+    script:
+        "../scripts/qc_metrics.py"
+
+rule multiqc:
+    input:
+        expand(config["output"]["qc_dir"] + "/{sample}_nanoplot_stats.txt", sample=SAMPLES),
+        expand(config["output"]["qc_dir"] + "/{sample}_alignment_metrics.txt", sample=SAMPLES)
+    output:
+        report = config["output"]["qc_dir"] + "/multiqc_report.html"
+    log:
+        config["output"]["qc_dir"] + "/logs/multiqc.log"
+    conda:
+        "../envs/base.yaml"
+    shell:
+        """
+        multiqc {config[output][qc_dir]} \
+            -o {config[output][qc_dir]} \
+            -f \
+            -n multiqc_report.html \
+            2> {log}
+        """
+```
+
+### `rules/transcripts.smk`
+
+```python
+rule identify_transcripts:
+    input:
+        bam = config["output"]["align_dir"] + "/{sample}.bam",
+        reference = config["reference"]["genome"],
+        annotation = config["reference"]["annotation"]
+    output:
+        isoforms = config["output"]["transcript_dir"] + "/{sample}_isoforms.csv",
+        counts = config["output"]["transcript_dir"] + "/{sample}_counts.csv"
+    log:
+        config["output"]["transcript_dir"] + "/logs/{sample}_transcript_id.log"
+    conda:
+        "../envs/base.yaml"
+    script:
+        "../scripts/transcript_identification.py"
+
+rule compare_transcripts:
+    input:
+        tumor_isoforms = lambda wildcards: expand(
+            config["output"]["transcript_dir"] + "/{sample}_isoforms.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "tumor"]
+        ),
+        tumor_counts = lambda wildcards: expand(
+            config["output"]["transcript_dir"] + "/{sample}_counts.csv", 
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "tumor"]
+        ),
+        normal_isoforms = lambda wildcards: expand(
+            config["output"]["transcript_dir"] + "/{sample}_isoforms.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "normal"]
+        ),
+        normal_counts = lambda wildcards: expand(
+            config["output"]["transcript_dir"] + "/{sample}_counts.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "normal"]
+        )
+    output:
+        differential = config["output"]["transcript_dir"] + "/differential_isoforms.csv",
+        novel = config["output"]["transcript_dir"] + "/novel_isoforms.csv",
+        summary = config["output"]["transcript_dir"] + "/isoform_summary.txt"
+    log:
+        config["output"]["transcript_dir"] + "/logs/transcript_comparison.log"
+    conda:
+        "../envs/r_env.yaml"
+    script:
+        "../scripts/transcript_comparison.R"
+```
+
+### `rules/splicing.smk`
+
+```python
+rule extract_splice_junctions:
+    input:
+        bam = config["output"]["align_dir"] + "/{sample}.bam"
+    output:
+        junctions = config["output"]["splicing_dir"] + "/{sample}_junctions.csv"
+    params:
+        min_support = config["params"]["splicing"]["min_support"]
+    log:
+        config["output"]["splicing_dir"] + "/logs/{sample}_junctions.log"
+    conda:
+        "../envs/base.yaml"
+    script:
+        "../scripts/extract_junctions.py"
+
+rule compare_splice_junctions:
+    input:
+        tumor_junctions = lambda wildcards: expand(
+            config["output"]["splicing_dir"] + "/{sample}_junctions.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "tumor"]
+        ),
+        normal_junctions = lambda wildcards: expand(
+            config["output"]["splicing_dir"] + "/{sample}_junctions.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "normal"]
+        )
+    output:
+        tumor_specific = config["output"]["splicing_dir"] + "/tumor_specific_junctions.csv",
+        differential = config["output"]["splicing_dir"] + "/differential_junctions.csv",
+        plots_dir = directory(config["output"]["splicing_dir"] + "/plots")
+    log:
+        config["output"]["splicing_dir"] + "/logs/junction_comparison.log"
+    conda:
+        "../envs/base.yaml"
+    script:
+        "../scripts/splice_analysis.py"
+```
+
+### `rules/fusion.smk`
+
+```python
+rule extract_gene_positions:
+    input:
+        annotation = config["reference"]["annotation"]
+    output:
+        gene_positions = config["output"]["fusion_dir"] + "/gene_positions.pkl"
+    log:
+        config["output"]["fusion_dir"] + "/logs/gene_positions.log"
+    conda:
+        "../envs/base.yaml"
+    script:
+        "../scripts/extract_gene_positions.py"
+
+rule detect_fusion_candidates:
+    input:
+        bam = config["output"]["align_dir"] + "/{sample}.bam",
+        gene_positions = config["output"]["fusion_dir"] + "/gene_positions.pkl"
+    output:
+        fusions = config["output"]["fusion_dir"] + "/{sample}_fusions.csv"
+    params:
+        min_support = config["params"]["fusion"]["min_support"]
+    log:
+        config["output"]["fusion_dir"] + "/logs/{sample}_fusion_detection.log"
+    conda:
+        "../envs/base.yaml"
+    script:
+        "../scripts/fusion_detection.py"
+
+rule filter_tumor_specific_fusions:
+    input:
+        tumor_fusions = lambda wildcards: expand(
+            config["output"]["fusion_dir"] + "/{sample}_fusions.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "tumor"]
+        ),
+        normal_fusions = lambda wildcards: expand(
+            config["output"]["fusion_dir"] + "/{sample}_fusions.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "normal"]
+        )
+    output:
+        tumor_specific = config["output"]["fusion_dir"] + "/tumor_specific_fusions.csv",
+        plots_dir = directory(config["output"]["fusion_dir"] + "/plots")
+    log:
+        config["output"]["fusion_dir"] + "/logs/fusion_filtering.log"
+    conda:
+        "../envs/base.yaml"
+    script:
+        "../scripts/filter_fusions.py"
+```
+
+### `rules/ase.smk`
+
+```python
+rule extract_variants:
+    input:
+        bam = config["output"]["align_dir"] + "/{sample}.bam",
+        vcf = config["reference"]["variants"]
+    output:
+        variants = config["output"]["ase_dir"] + "/{sample}_read_variants.pkl"
+    log:
+        config["output"]["ase_dir"] + "/logs/{sample}_extract_variants.log"
+    conda:
+        "../envs/base.yaml"
+    script:
+        "../scripts/extract_variants.py"
+
+rule phase_variants:
+    input:
+        variants = config["output"]["ase_dir"] + "/{sample}_read_variants.pkl"
+    output:
+        phased = config["output"]["ase_dir"] + "/{sample}_phased_blocks.pkl"
+    log:
+        config["output"]["ase_dir"] + "/logs/{sample}_phase_variants.log"
+    conda:
+        "../envs/base.yaml"
+    script:
+        "../scripts/phase_variants.py"
+
+rule quantify_ase:
+    input:
+        bam = config["output"]["align_dir"] + "/{sample}.bam",
+        phased = config["output"]["ase_dir"] + "/{sample}_phased_blocks.pkl",
+        annotation = config["reference"]["annotation"]
+    output:
+        ase_results = config["output"]["ase_dir"] + "/{sample}_ase_results.csv",
+        plots_dir = directory(config["output"]["ase_dir"] + "/{sample}_ase_plots")
+    params:
+        min_coverage = config["params"]["ase"]["min_coverage"]
+    log:
+        config["output"]["ase_dir"] + "/logs/{sample}_quantify_ase.log"
+    conda:
+        "../envs/base.yaml"
+    script:
+        "../scripts/quantify_ase.py"
+```
+
+### `rules/clinical.smk`
+
+```python
+rule integrate_clinical_data:
+    input:
+        isoforms = expand(
+            config["output"]["transcript_dir"] + "/{sample}_isoforms.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "tumor"]
+        ),
+        junctions = expand(
+            config["output"]["splicing_dir"] + "/{sample}_junctions.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "tumor"]
+        ),
+        fusions = expand(
+            config["output"]["fusion_dir"] + "/{sample}_fusions.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "tumor"]
+        ),
+        ase = expand(
+            config["output"]["ase_dir"] + "/{sample}_ase_results.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "tumor"]
+        ),
+        clinical = config["clinical_data"]
+    output:
+        integrated = config["output"]["clinical_dir"] + "/integrated_data.csv",
+        survival = config["output"]["clinical_dir"] + "/survival_analysis.csv",
+        plots_dir = directory(config["output"]["clinical_dir"] + "/plots")
+    params:
+        outcome_col = config["params"]["clinical"]["outcome_column"],
+        event_col = config["params"]["clinical"]["event_column"],
+        sample_id_col = config["params"]["clinical"]["sample_id_column"]
+    log:
+        config["output"]["clinical_dir"] + "/logs/clinical_integration.log"
+    conda:
+        "../envs/r_env.yaml"
+    script:
+        "../scripts/clinical_integration.R"
+```
+
+### `rules/reporting.smk`
+
+```python
+rule create_qc_report:
+    input:
+        qc_metrics = expand(config["output"]["qc_dir"] + "/{sample}_alignment_metrics.txt", sample=SAMPLES),
+        nanoplot = expand(config["output"]["qc_dir"] + "/{sample}_nanoplot.html", sample=SAMPLES),
+        multiqc = config["output"]["qc_dir"] + "/multiqc_report.html"
+    output:
+        report = config["output"]["qc_dir"] + "/qc_report.html"
+    log:
+        config["output"]["qc_dir"] + "/logs/create_qc_report.log"
+    conda:
+        "../envs/r_env.yaml"
+    script:
+        "../scripts/create_qc_report.Rmd"
+
+rule create_transcript_report:
+    input:
+        differential = config["output"]["transcript_dir"] + "/differential_isoforms.csv",
+        novel = config["output"]["transcript_dir"] + "/novel_isoforms.csv",
+        summary = config["output"]["transcript_dir"] + "/isoform_summary.txt"
+    output:
+        report = config["output"]["transcript_dir"] + "/transcript_summary.html"
+    log:
+        config["output"]["transcript_dir"] + "/logs/create_transcript_report.log"
+    conda:
+        "../envs/r_env.yaml"
+    script:
+        "../scripts/create_transcript_report.Rmd"
+
+rule create_splicing_report:
+    input:
+        tumor_specific = config["output"]["splicing_dir"] + "/tumor_specific_junctions.csv",
+        differential = config["output"]["splicing_dir"] + "/differential_junctions.csv",
+        plots_dir = config["output"]["splicing_dir"] + "/plots"
+    output:
+        report = config["output"]["splicing_dir"] + "/splicing_analysis.html"
+    log:
+        config["output"]["splicing_dir"] + "/logs/create_splicing_report.log"
+    conda:
+        "../envs/r_env.yaml"
+    script:
+        "../scripts/create_splicing_report.Rmd"
+
+rule create_fusion_report:
+    input:
+        tumor_specific = config["output"]["fusion_dir"] + "/tumor_specific_fusions.csv",
+        plots_dir = config["output"]["fusion_dir"] + "/plots"
+    output:
+        report = config["output"]["fusion_dir"] + "/fusion_detection.html"
+    log:
+        config["output"]["fusion_dir"] + "/logs/create_fusion_report.log"
+    conda:
+        "../envs/r_env.yaml"
+    script:
+        "../scripts/create_fusion_report.Rmd"
+
+rule create_ase_report:
+    input:
+        ase_results = expand(
+            config["output"]["ase_dir"] + "/{sample}_ase_results.csv",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "tumor"]
+        ),
+        plots_dir = expand(
+            config["output"]["ase_dir"] + "/{sample}_ase_plots",
+            sample=[s for s in SAMPLES if config["samples"][s]["type"] == "tumor"]
+        )
+    output:
+        report = config["output"]["ase_dir"] + "/ase_analysis.html"
+    log:
+        config["output"]["ase_dir"] + "/logs/create_ase_report.log"
+    conda:
+        "../envs/r_env.yaml"
+    script:
+        "../scripts/create_ase_report.Rmd"
+
+rule create_clinical_report:
+    input:
+        integrated = config["output"]["clinical_dir"] + "/integrated_data.csv",
+        survival = config["output"]["clinical_dir"] + "/survival_analysis.csv",
+        plots_dir = config["output"]["clinical_dir"] + "/plots"
+    output:
+        report = config["output"]["clinical_dir"] + "/clinical_integration.html"
+    log:
+        config["output"]["clinical_dir"] + "/logs/create_clinical_report.log"
+    conda:
+        "../envs/r_env.yaml"
+    script:
+        "../scripts/create_clinical_report.Rmd"
+```
+
+### `scripts/qc_metrics.py`
+
+```python
+#!/usr/bin/env python
+"""
+Calculate quality control metrics for long-read RNA-seq data
+"""
+
+import sys
+import pandas as pd
+import numpy as np
+import pysam
+
+def calculate_qc_metrics(bam_file, output_file, min_read_length=500):
+    """
+    Calculate basic QC metrics for long-read data
+    """
+    
+    metrics = {}
+    total_reads = 0
+    mapped_reads = 0
+    read_lengths = []
+    
+    # Open BAM file
+    bam = pysam.AlignmentFile(bam_file, "rb")
+    
+    # Iterate through reads
+    for read in bam:
+        total_reads += 1
+        
+        # Store read length
+        read_length = len(read.query_sequence) if read.query_sequence else 0
+        if read_length >= min_read_length:
+            read_lengths.append(read_length)
+        
+        # Check if read is mapped
+        if not read.is_unmapped:
+            mapped_reads += 1
+    
+    # Calculate mapping rate
+    mapping_rate = (mapped_reads / total_reads) * 100 if total_reads > 0 else 0
+    
+    # Calculate read length statistics
+    metrics['total_reads'] = total_reads
+    metrics['mapped_reads'] = mapped_reads
+    metrics['mapping_rate'] = mapping_rate
+    metrics['median_read_length'] = np.median(read_lengths) if read_lengths else 0
+    metrics['mean_read_length'] = np.mean(read_lengths) if read_lengths else 0
+    metrics['min_read_length'] = np.min(read_lengths) if read_lengths else 0
+    metrics['max_read_length'] = np.max(read_lengths) if read_lengths else 0
+    metrics['reads_>10kb'] = sum(1 for l in read_lengths if l > 10000)
+    metrics['reads_>5kb'] = sum(1 for l in read_lengths if l > 5000)
+    
+    # Write metrics to output file
+    with open(output_file, 'w') as f:
+        for key, value in metrics.items():
+            f.write(f"{key}\t{value}\n")
+    
+    return metrics
+
+# Snakemake integration
+if __name__ == "__main__":
+    bam_file = snakemake.input.bam
+    output_file = snakemake.output.metrics
+    min_read_length = snakemake.params.get("min_read_length", 500)
+    
+    calculate_qc_metrics(bam_file, output_file, min_read_length)
+```
+
+### `scripts/extract_junctions.py`
+
+```python
+#!/usr/bin/env python
+"""
+Extract splice junctions from long-read alignments
+"""
+
+import sys
+import pandas as pd
+from collections import defaultdict
+import pysam
+
+def extract_splice_junctions(bam_file, output_file, min_support=3):
+    """
+    Extract splice junctions from a BAM file
+    """
+    
+    junctions = defaultdict(int)
+    
+    # Open BAM file
+    bam = pysam.AlignmentFile(bam_file, "rb")
+    
+    # Iterate through aligned reads
+    for read in bam:
+        if read.is_unmapped:
+            continue
+            
+        # Skip reads without CIGAR string
+        if not read.cigartuples:
+            continue
+            
+        # Extract positions and reference positions
+        pos = read.pos
+        chrom = bam.get_reference_name(read.reference_id)
+        
+        # Analyze CIGAR string to find splice junctions (N operations)
+        for operation, length in read.cigartuples:
+            if operation == 0:  # Match
+                pos += length
+            elif operation == 1:  # Insertion
+                continue
+            elif operation == 2:  # Deletion
+                pos += length
+            elif operation == 3:  # Splice junction (N)
+                junction_start = pos
+                junction_end = pos + length
+                junction_id = f"{chrom}:{junction_start}-{junction_end}"
+                junctions[junction_id] += 1
+                pos += length
+                
+    # Filter junctions by minimum support
+    filtered_junctions = {j: count for j, count in junctions.items() if count >= min_support}
+    
+    # Convert to DataFrame
+    junctions_df = pd.DataFrame({
+        'junction_id': list(filtered_junctions.keys()),
+        'read_count': list(filtered_junctions.values())
+    })
+    
+    # Parse junction coordinates
+    junctions_df[['chrom', 'coordinates']] = junctions_df['junction_id'].str.split(':', expand=True)
+    junctions_df[['start', 'end']] = junctions_df['coordinates'].str.split('-', expand=True)
+    junctions_df['start'] = junctions_df['start'].astype(int)
+    junctions_df['end'] = junctions_df['end'].astype(int)
+    
+    # Write to output file
+    junctions_df.to_csv(output_file, index=False)
+    
+    return junctions_df
+
+# Snakemake integration
+if __name__ == "__main__":
+    bam_file = snakemake.input.bam
+    output_file = snakemake.output.junctions
+    min_support = snakemake.params.min_support
+    
+    extract_splice_junctions(bam_file, output_file, min_support)
+```
+
+### `scripts/transcript_identification.py`
+
+```python
+#!/usr/bin/env python
+"""
+Identify and quantify full-length transcripts from long reads
+"""
+
+import os
+import sys
+import json
+import subprocess
+import pandas as pd
+
+def identify_transcripts(bam_file, reference_genome, reference_gtf, 
+                        output_isoforms, output_counts, min_coverage=3):
+    """
+    Identify and quantify full-length transcripts using FLAMES
+    """
+    
+    # Create temporary output directory
+    output_dir = os.path.dirname(output_isoforms)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get sample name from bam file
+    sample_name = os.path.basename(bam_file).split('.')[0]
+    
+    # Set up FLAMES config
+    config_file = f"{output_dir}/{sample_name}_config.json"
+    
+    config = {
+        "genome_annotation": reference_gtf,
+        "genome_dir": os.path.dirname(reference_genome),
+        "genome_file": os.path.basename(reference_genome),
+        "outdir": output_dir,
+        "thread": 16,
+        "sample_name": sample_name,
+        "fastq_file": "",  # We're using the BAM directly
+        "bam_file": bam_file,
+        "do_genome_alignment": False,  # Already aligned
+        "minimap2_dir": "",  # Will use system installation
+        "annotation_flatten_flag": True,
+        "transcript_counting": True,
+        "do_isoform_identification": True,
+        "do_read_realignment": True,
+        "do_error_correction": True,
+        "min_transcript_coverage": min_coverage
+    }
+    
+    # Write config to file
+    with open(config_file, 'w') as f:
+        json.dump(config, f, indent=4)
+    
+    # Run FLAMES
+    subprocess.run(f"flames {config_file}", shell=True, check=True)
+    
+    # Copy results to output files (FLAMES creates its own naming scheme)
+    flames_isoforms = f"{output_dir}/{sample_name}_isoforms.csv"
+    flames_counts = f"{output_dir}/{sample_name}_counts.csv"
+    
+    # If files exist, copy them to the specified output
+    if os.path.exists(flames_isoforms):
+        subprocess.run(f"cp {flames_isoforms} {output_isoforms}", shell=True, check=True)
+    else:
+        # Create empty files if FLAMES didn't produce output
+        pd.DataFrame().to_csv(output_isoforms, index=False)
+        
+    if os.path.exists(flames_counts):
+        subprocess.run(f"cp {flames_counts} {output_counts}", shell=True, check=True)
+    else:
+        pd.DataFrame().to_csv(output_counts, index=False)
+
+# Snakemake integration
+if __name__ == "__main__":
+    bam_file = snakemake.input.bam
+    reference_genome = snakemake.input.reference
+    reference_gtf = snakemake.input.annotation
+    output_isoforms = snakemake.output.isoforms
+    output_counts = snakemake.output.counts
+    min_coverage = snakemake.params.get("min_coverage", 3)
+    
+    identify_transcripts(bam_file, reference_genome, reference_gtf, 
+                         output_isoforms, output_counts, min_coverage)
+```
+
+### `scripts/fusion_detection.py`
+
+```python
+#!/usr/bin/env python
+"""
+Detect fusion transcripts from long-read alignments
+"""
+
+import sys
+import pickle
+import pandas as pd
+from collections import defaultdict
+import pysam
+
+def detect_fusion_candidates(bam_file, gene_positions_file, output_file, min_support=2):
+    """
+    Detect potential fusion transcripts from long reads
+    """
+    
+    # Load gene positions (from extract_gene_positions.py)
+    with open(gene_positions_file, 'rb') as f:
+        gene_trees, gene_names = pickle.load(f)
+    
+    fusion_candidates = defaultdict(int)
+    
+    # Open BAM file
+    bam = pysam.AlignmentFile(bam_file, "rb")
+    
+    # Process each read
+    for read in bam:
+        if read.is_unmapped or read.is_secondary or read.is_supplementary:
+            continue
+            
+        # Skip reads with low mapping quality
+        if read.mapping_quality < 20:
+            continue
+            
+        # Check for supplementary alignments (possible fusion indicator)
+        if not read.has_tag('SA'):
+            continue
+            
+        # Get primary alignment information
+        primary_chrom = bam.get_reference_name(read.reference_id)
+        primary_pos = read.reference_start
+        
+        # Get supplementary alignment information
+        sa_tag = read.get_tag('SA')
+        sa_alignments = sa_tag.strip().split(';')
+        
+        for sa_aln in sa_alignments:
+            if not sa_aln:
+                continue
+                
+            # Parse supplementary alignment
+            sa_parts = sa_aln.split(',')
+            if len(sa_parts) < 6:
+                continue
+                
+            sa_chrom, sa_pos, sa_strand, sa_cigar, sa_mapq, sa_nm = sa_parts
+            sa_pos = int(sa_pos)
+            
+            # Skip same chromosome nearby alignments (likely structural misalignments, not fusions)
+            if sa_chrom == primary_chrom and abs(sa_pos - primary_pos) < 100000:
+                continue
+                
+            # Find genes that overlap with alignment positions
+            primary_genes = []
+            if primary_chrom in gene_trees:
+                primary_overlaps = gene_trees[primary_chrom][primary_pos:primary_pos+1]
+                primary_genes = [overlap.data for overlap in primary_overlaps]
+            
+            sa_genes = []
+            if sa_chrom in gene_trees:
+                sa_overlaps = gene_trees[sa_chrom][sa_pos:sa_pos+1]
+                sa_genes = [overlap.data for overlap in sa_overlaps]
+            
+            # If both alignments overlap genes, potential fusion
+            for gene1 in primary_genes:
+                for gene2 in sa_genes:
+                    if gene1 != gene2:  # Avoid self-fusions
+                        # Create fusion pair (order alphabetically for consistency)
+                        fusion = tuple(sorted([gene1, gene2]))
+                        fusion_candidates[fusion] += 1
+    
+    # Filter by minimum support
+    filtered_fusions = {fusion: count for fusion, count in fusion_candidates.items() 
+                       if count >= min_support}
+    
+    # Convert to DataFrame
+    fusions_df = pd.DataFrame({
+        'gene1_id': [f[0] for f in filtered_fusions.keys()],
+        'gene2_id': [f[1] for f in filtered_fusions.keys()],
+        'supporting_reads': list(filtered_fusions.values())
+    })
+    
+    # Add gene names
+    fusions_df['gene1_name'] = fusions_df['gene1_id'].map(gene_names)
+    fusions_df['gene2_name'] = fusions_df['gene2_id'].map(gene_names)
+    
+    # Fusion name
+    fusions_df['fusion_name'] = fusions_df['gene1_name'] + '--' + fusions_df['gene2_name']
+    
+    # Write to output file
+    fusions_df.to_csv(output_file, index=False)
+    
+    return fusions_df
+
+# Snakemake integration
+if __name__ == "__main__":
+    bam_file = snakemake.input.bam
+    gene_positions_file = snakemake.input.gene_positions
+    output_file = snakemake.output.fusions
+    min_support = snakemake.params.min_support
+    
+    detect_fusion_candidates(bam_file, gene_positions_file, output_file, min_support)
+```
+
+### `scripts/extract_gene_positions.py`
+
+```python
+#!/usr/bin/env python
+"""
+Extract gene positions from GTF file for fusion detection
+"""
+
+import sys
+import pickle
+import re
+from collections import defaultdict
+from intervaltree import IntervalTree
+
+def extract_gene_positions(gtf_file, output_file):
+    """
+    Extract gene positions from GTF file and create interval trees
+    """
+    
+    gene_positions = defaultdict(list)
+    gene_names = {}
+    
+    # Parse GTF file
+    with open(gtf_file, 'r') as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
+                
+            fields = line.strip().split('\t')
+            if fields[2] != 'gene':
+                continue
+                
+            chrom = fields[0]
+            start = int(fields[3])
+            end = int(fields[4])
+            
+            # Extract gene ID and name from attributes
+            attributes = fields[8]
+            gene_id_match = re.search(r'gene_id "([^"]+)"', attributes)
+            gene_name_match = re.search(r'gene_name "([^"]+)"', attributes)
+            
+            if gene_id_match:
+                gene_id = gene_id_match.group(1)
+                
+                # Get gene name if available, otherwise use gene_id
+                gene_name = gene_id
+                if gene_name_match:
+                    gene_name = gene_name_match.group(1)
+                    
+                gene_positions[chrom].append((start, end, gene_id))
+                gene_names[gene_id] = gene_name
+    
+    # Create interval trees for fast overlap checking
+    gene_trees = {}
+    for chrom, positions in gene_positions.items():
+        tree = IntervalTree()
+        for start, end, gene_id in positions:
+            tree[start:end] = gene_id
+        gene_trees[chrom] = tree
+    
+    # Save to output file
+    with open(output_file, 'wb') as f:
+        pickle.dump((gene_trees, gene_names), f)
+    
+    return gene_trees, gene_names
+
+# Snakemake integration
+if __name__ == "__main__":
+    gtf_file = snakemake.input.annotation
+    output_file = snakemake.output.gene_positions
+    
+    extract_gene_positions(gtf_file, output_file)
+```
+
+### `scripts/extract_variants.py`
+
+```python
+#!/usr/bin/env python
+"""
+Extract variants from long reads for allele-specific expression analysis
+"""
+
+import sys
+import pickle
+from collections import defaultdict
+import pysam
+
+def extract_variants_from_reads(bam_file, vcf_file, output_file, region=None):
+    """
+    Extract variants from long reads and store read-variant associations
+    """
+    
+    # Open BAM and VCF files
+    bam = pysam.AlignmentFile(bam_file, "rb")
+    vcf = pysam.VariantFile(vcf_file, "r")
+    
+    # Dictionary to store read-variant associations
+    read_variants = defaultdict(list)
+    variant_positions = {}
+    
+    # Process VCF to get variant positions
+    for variant in vcf.fetch(region=region):
+        var_id = f"{variant.chrom}:{variant.pos}_{variant.ref}_{','.join(variant.alts)}"
+        variant_positions[(variant.chrom, variant.pos)] = var_id
+    
+    # Process reads to find variants
+    for read in bam.fetch(region=region):
+        if read.is_unmapped:
+            continue
+            
+        read_id = read.query_name
+        read_seq = read.query_sequence
+        
+        # Get reference positions
+        aligned_pairs = read.get_aligned_pairs(with_seq=True)
+        
+        for read_pos, ref_pos, ref_base in aligned_pairs:
+            # Skip positions without alignment
+            if read_pos is None or ref_pos is None:
+                continue
+                
+            chrom = bam.get_reference_name(read.reference_id)
+            var_key = (chrom, ref_pos + 1)  # Convert to 1-based for VCF compatibility
+            
+            # Check if position is a known variant
+            if var_key in variant_positions:
+                read_base = read_seq[read_pos]
+                var_id = variant_positions[var_key]
+                
+                # Store variant info for this read
+                read_variants[read_id].append((var_id, read_base))
+    
+    # Save to output file
+    with open(output_file, 'wb') as f:
+        pickle.dump(read_variants, f)
+    
+    return read_variants
+
+# Snakemake integration
+if __name__ == "__main__":
+    bam_file = snakemake.input.bam
+    vcf_file = snakemake.input.vcf
+    output_file = snakemake.output.variants
+    region = snakemake.params.get("region", None)
+    
+    extract_variants_from_reads(bam_file, vcf_file, output_file, region)
+```
+
+### `scripts/phase_variants.py`
+
+```python
+#!/usr/bin/env python
+"""
+Phase variants based on co-occurrence in long reads
+"""
+
+import sys
+import pickle
+from collections import defaultdict, deque
+
+def phase_variants(variants_file, output_file, min_support=2):
+    """
+    Group variants into haplotypes based on co-occurrence in reads
+    """
+    
+    # Load variants
+    with open(variants_file, 'rb') as f:
+        read_variants = pickle.load(f)
+    
+    # Count co-occurrences of variant pairs
+    pair_counts = defaultdict(int)
+    
+    for read_id, variants in read_variants.items():
+        # Skip reads with only one variant
+        if len(variants) < 2:
+            continue
+            
+        # Count all pairs of variants in this read
+        for i in range(len(variants)):
+            for j in range(i+1, len(variants)):
+                var1_id, var1_allele = variants[i]
+                var2_id, var2_allele = variants[j]
+                
+                pair_key = ((var1_id, var1_allele), (var2_id, var2_allele))
+                pair_counts[pair_key] += 1
+    
+    # Filter by minimum support
+    filtered_pairs = {pair: count for pair, count in pair_counts.items() 
+                     if count >= min_support}
+    
+    # Create a graph representation for connected components
+    graph = defaultdict(set)
+    for ((var1_id, var1_allele), (var2_id, var2_allele)), _ in filtered_pairs.items():
+        graph[(var1_id, var1_allele)].add((var2_id, var2_allele))
+        graph[(var2_id, var2_allele)].add((var1_id, var1_allele))
+    
+    # Find connected components (phased blocks)
+    phased_blocks = []
+    visited = set()
+    
+    for node in graph:
+        if node in visited:
+            continue
+            
+        # BFS to find all connected nodes
+        block = set()
+        queue = deque([node])
+        
+        while queue:
+            current = queue.popleft()
+            if current in visited:
+                continue
+                
+            visited.add(current)
+            block.add(current)
+            
+            for neighbor in graph[current]:
+                if neighbor not in visited:
+                    queue.append(neighbor)
+        
+        phased_blocks.append(block)
+    
+    # Convert blocks to a more readable format
+    phased_results = []
+    
+    for block_idx, block in enumerate(phased_blocks):
+        block_variants = defaultdict(list)
+        
+        for var_id, allele in block:
+            block_variants[var_id].append(allele)
+            
+        phased_results.append({
+            'block_id': block_idx,
+            'variants': dict(block_variants),
+            'size': len(block_variants)
+        })
+    
+    # Save to output file
+    with open(output_file, 'wb') as f:
+        pickle.dump(phased_results, f)
+    
+    return phased_results
+
+# Snakemake integration
+if __name__ == "__main__":
+    variants_file = snakemake.input.variants
+    output_file = snakemake.output.phased
+    min_support = snakemake.params.get("min_support", 2)
+    
+    phase_variants(variants_file, output_file, min_support)
+```
+
+### `scripts/quantify_ase.py`
+
+```python
+#!/usr/bin/env python
+"""
+Quantify allele-specific expression using phased variants
+"""
+
+import sys
+import os
+import pickle
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import pysam
+import re
+
+def extract_gene_regions(gtf_file, genes_of_interest=None):
+    """
+    Extract genomic regions for genes of interest
+    """
+    
+    gene_regions = {}
+    
+    # Parse GTF file
+    with open(gtf_file, 'r') as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
+                
+            fields = line.strip().split('\t')
+            if fields[2] != 'gene':
+                continue
+                
+            # Extract attributes
+            attributes = fields[8]
+            gene_id_match = re.search(r'gene_id "([^"]+)"', attributes)
+            
+            if not gene_id_match:
+                continue
+                
+            gene_id = gene_id_match.group(1)
+            
+            # Skip if not in genes of interest (if specified)
+            if genes_of_interest and gene_id not in genes_of_interest:
+                continue
+                
+            chrom = fields[0]
+            start = int(fields[3])
+            end = int(fields[4])
+            
+            gene_regions[gene_id] = (chrom, start, end)
+    
+    return gene_regions
+
+def quantify_ase(bam_file, phased_file, gtf_file, output_file, plots_dir, min_coverage=10,
+                genes_of_interest=None):
+    """
+    Quantify allele-specific expression using phased variants
+    """
+    
+    # Create plots directory
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    # Load phased blocks
+    with open(phased_file, 'rb') as f:
+        phased_blocks = pickle.load(f)
+    
+    # Extract gene regions
+    gene_regions = extract_gene_regions(gtf_file, genes_of_interest)
+    
+    # Open BAM file
+    bam = pysam.AlignmentFile(bam_file, "rb")
+    
+    ase_results = []
+    
+    # Process each gene region
+    for gene_id, region in gene_regions.items():
+        chrom, start, end = region
+        
+        # Count reads supporting each haplotype
+        hap1_count = 0
+        hap2_count = 0
+        unphased_count = 0
+        
+        # Process reads in this region
+        for read in bam.fetch(chrom, start, end):
+            if read.is_unmapped:
+                continue
+                
+            read_id = read.query_name
+            
+            # Try to assign this read to a haplotype
+            assigned = False
+            
+            # Check variants in this read against phased blocks
+            for block in phased_blocks:
+                hap1_matches = 0
+                hap2_matches = 0
+                
+                # Extract alleles from read sequence
+                read_seq = read.query_sequence
+                aligned_pairs = read.get_aligned_pairs(with_seq=True)
+                read_variants = {}
+                
+                for read_pos, ref_pos, ref_base in aligned_pairs:
+                    if read_pos is None or ref_pos is None:
+                        continue
+                        
+                    var_key = f"{chrom}:{ref_pos+1}"
+                    read_allele = read_seq[read_pos]
+                    read_variants[var_key] = read_allele
+                
+                # Check if read variants match phased variants
+                for var_id, alleles in block['variants'].items():
+                    var_prefix = var_id.split('_')[0]  # Extract position part
+                    
+                    if var_prefix in read_variants:
+                        read_allele = read_variants[var_prefix]
+                        
+                        if alleles[0] == read_allele:
+                            hap1_matches += 1
+                        elif len(alleles) > 1 and alleles[1] == read_allele:
+                            hap2_matches += 1
+                
+                # Assign to haplotype with more matches
+                if hap1_matches > 0 or hap2_matches > 0:
+                    if hap1_matches > hap2_matches:
+                        hap1_count += 1
+                        assigned = True
+                        break
+                    elif hap2_matches > hap1_matches:
+                        hap2_count += 1
+                        assigned = True
+                        break
+            
+            # Count unphased reads
+            if not assigned:
+                unphased_count += 1
+        
+        # Calculate allelic ratio if coverage is sufficient
+        total_phased = hap1_count + hap2_count
+        if total_phased >= min_coverage:
+            hap1_ratio = hap1_count / total_phased
+            hap2_ratio = hap2_count / total_phased
+            ase_score = abs(hap1_ratio - 0.5) * 2  # 0=balanced, 1=monoallelic
+        else:
+            hap1_ratio = np.nan
+            hap2_ratio = np.nan
+            ase_score = np.nan
+        
+        # Store results
+        ase_results.append({
+            'gene_id': gene_id,
+            'haplotype1_count': hap1_count,
+            'haplotype2_count': hap2_count,
+            'unphased_count': unphased_count,
+            'total_phased': total_phased,
+            'haplotype1_ratio': hap1_ratio,
+            'haplotype2_ratio': hap2_ratio,
+            'ase_score': ase_score
+        })
+        
+        # Create visualization for this gene
+        if total_phased >= min_coverage:
+            plt.figure(figsize=(8, 6))
+            plt.bar(['Haplotype 1', 'Haplotype 2'], [hap1_count, hap2_count], color=['blue', 'orange'])
+            plt.title(f'Allele-Specific Expression for {gene_id}')
+            plt.ylabel('Read Count')
+            plt.savefig(f"{plots_dir}/{gene_id}_ase.png")
+            plt.close()
+    
+    # Convert to DataFrame and save
+    ase_df = pd.DataFrame(ase_results)
+    ase_df.to_csv(output_file, index=False)
+    
+    # Create summary plot of ASE scores
+    if len(ase_df) > 0 and not ase_df['ase_score'].isna().all():
+        plt.figure(figsize=(10, 6))
+        sorted_df = ase_df.sort_values('ase_score', ascending=False).dropna(subset=['ase_score'])
+        plt.bar(sorted_df['gene_id'], sorted_df['ase_score'], color='purple')
+        plt.axhline(y=0.3, color='red', linestyle='--', alpha=0.7)  # Typical threshold for ASE
+        plt.xticks(rotation=90)
+        plt.title('Allele-Specific Expression Scores')
+        plt.ylabel('ASE Score (0 = balanced, 1 = monoallelic)')
+        plt.tight_layout()
+        plt.savefig(f"{plots_dir}/ase_scores_summary.png")
+        plt.close()
+    
+    return ase_df
+
+# Snakemake integration
+if __name__ == "__main__":
+    bam_file = snakemake.input.bam
+    phased_file = snakemake.input.phased
+    gtf_file = snakemake.input.annotation
+    output_file = snakemake.output.ase_results
+    plots_dir = snakemake.output.plots_dir
+    min_coverage = snakemake.params.min_coverage
+    
+    # Define a list of cancer-related genes (optional)
+    cancer_genes = [
+        'TP53', 'BRCA1', 'BRCA2', 'EGFR', 'KRAS', 'PIK3CA', 'PTEN', 'RB1', 'CDKN2A',
+        'APC', 'BRAF', 'NRAS', 'IDH1', 'IDH2', 'KIT', 'PDGFRA', 'FGFR1', 'FGFR2',
+        'FGFR3', 'ALK', 'ROS1', 'RET', 'ERBB2', 'MYC', 'MYCN', 'CDH1', 'CTNNB1'
+    ]
+    
+    quantify_ase(bam_file, phased_file, gtf_file, output_file, plots_dir, min_coverage, cancer_genes)
+```
+
+### `scripts/splice_analysis.py`
+
+```python
+#!/usr/bin/env python
+"""
+Compare splice junctions between tumor and normal samples
+"""
+
+import sys
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def compare_junctions(tumor_junctions_files, normal_junctions_files, 
+                      tumor_specific_output, differential_output, plots_dir):
+    """
+    Compare splice junctions between tumor and normal samples
+    """
+    
+    # Create plots directory
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    # Combine tumor and normal junction data
+    tumor_junctions_all = []
+    for file in tumor_junctions_files:
+        sample_junctions = pd.read_csv(file)
+        sample_id = os.path.basename(file).split('_')[0]
+        sample_junctions['sample'] = sample_id
+        tumor_junctions_all.append(sample_junctions)
+    
+    normal_junctions_all = []
+    for file in normal_junctions_files:
+        sample_junctions = pd.read_csv(file)
+        sample_id = os.path.basename(file).split('_')[0]
+        sample_junctions['sample'] = sample_id
+        normal_junctions_all.append(sample_junctions)
+    
+    # Combine all samples
+    if tumor_junctions_all:
+        tumor_junctions = pd.concat(tumor_junctions_all)
+        # Get sum of read counts per junction across samples
+        tumor_junctions_summed = tumor_junctions.groupby('junction_id')['read_count'].sum().reset_index()
+    else:
+        tumor_junctions_summed = pd.DataFrame(columns=['junction_id', 'read_count'])
+    
+    if normal_junctions_all:
+        normal_junctions = pd.concat(normal_junctions_all)
+        # Get sum of read counts per junction across samples
+        normal_junctions_summed = normal_junctions.groupby('junction_id')['read_count'].sum().reset_index()
+    else:
+        normal_junctions_summed = pd.DataFrame(columns=['junction_id', 'read_count'])
+    
+    # Create sets of junction IDs
+    tumor_junction_set = set(tumor_junctions_summed['junction_id'])
+    normal_junction_set = set(normal_junctions_summed['junction_id'])
+    
+    # Find tumor-specific junctions
+    tumor_specific = tumor_junction_set - normal_junction_set
+    tumor_specific_df = tumor_junctions_summed[tumor_junctions_summed['junction_id'].isin(tumor_specific)]
+    
+    # Parse junction coordinates for tumor-specific junctions
+    if len(tumor_specific_df) > 0 and 'chrom' not in tumor_specific_df.columns:
+        tumor_specific_df[['chrom', 'coordinates']] = tumor_specific_df['junction_id'].str.split(':', expand=True)
+        tumor_specific_df[['start', 'end']] = tumor_specific_df['coordinates'].str.split('-', expand=True)
+    
+    # Find shared junctions with differential usage
+    shared_junctions = tumor_junction_set.intersection(normal_junction_set)
+    
+    # Create a comparison dataframe for shared junctions
+    if shared_junctions:
+        shared_comparison = pd.DataFrame({'junction_id': list(shared_junctions)})
+        shared_comparison = shared_comparison.merge(
+            tumor_junctions_summed[['junction_id', 'read_count']].rename(columns={'read_count': 'tumor_count'}),
+            on='junction_id'
+        )
+        shared_comparison = shared_comparison.merge(
+            normal_junctions_summed[['junction_id', 'read_count']].rename(columns={'read_count': 'normal_count'}),
+            on='junction_id'
+        )
+        
+        # Calculate fold change
+        shared_comparison['fold_change'] = shared_comparison['tumor_count'] / shared_comparison['normal_count']
+        shared_comparison['log2_fold_change'] = np.log2(shared_comparison['fold_change'])
+        
+        # Find differentially used junctions (simple threshold-based approach)
+        differential_junctions = shared_comparison[abs(shared_comparison['log2_fold_change']) > 1]
+    else:
+        shared_comparison = pd.DataFrame(columns=['junction_id', 'tumor_count', 'normal_count', 
+                                                 'fold_change', 'log2_fold_change'])
+        differential_junctions = shared_comparison.copy()
+    
+    # Save results
+    tumor_specific_df.to_csv(tumor_specific_output, index=False)
+    differential_junctions.to_csv(differential_output, index=False)
+    
+    # Create visualizations
+    
+    # 1. Scatter plot comparing junction usage
+    if len(shared_comparison) > 0:
+        plt.figure(figsize=(10, 8))
+        plt.scatter(shared_comparison['normal_count'], shared_comparison['tumor_count'], 
+                   alpha=0.6, s=30, edgecolor='k', linewidth=0.5)
+        
+        # Add diagonal line
+        max_val = max(shared_comparison['normal_count'].max(), shared_comparison['tumor_count'].max())
+        plt.plot([0, max_val], [0, max_val], 'k--', alpha=0.3)
+        
+        # Highlight differential junctions
+        if len(differential_junctions) > 0:
+            plt.scatter(differential_junctions['normal_count'], differential_junctions['tumor_count'],
+                       alpha=0.8, s=50, color='red', edgecolor='k', linewidth=0.5)
+        
+        # Labels and title
+        plt.xlabel('Normal Junction Count')
+        plt.ylabel('Tumor Junction Count')
+        plt.title('Splice Junction Usage: Tumor vs Normal')
+        plt.xscale('log')
+        plt.yscale('log')
+        plt.tight_layout()
+        plt.savefig(f"{plots_dir}/junction_usage_comparison.png")
+        plt.close()
+        
+        # 2. Histogram of fold changes
+        plt.figure(figsize=(10, 6))
+        plt.hist(shared_comparison['log2_fold_change'], bins=50, alpha=0.7, color='skyblue', edgecolor='black')
+        plt.axvline(x=0, color='red', linestyle='--')
+        plt.xlabel('Log2 Fold Change (Tumor/Normal)')
+        plt.ylabel('Number of Junctions')
+        plt.title('Distribution of Splice Junction Usage Changes')
+        plt.tight_layout()
+        plt.savefig(f"{plots_dir}/junction_fold_change_distribution.png")
+        plt.close()
+    
+    # 3. Top 20 tumor-specific junctions
+    if len(tumor_specific_df) > 0:
+        top_tumor_specific = tumor_specific_df.sort_values('read_count', ascending=False).head(20)
+        plt.figure(figsize=(12, 8))
+        plt.barh(np.arange(len(top_tumor_specific)), top_tumor_specific['read_count'], color='firebrick')
+        plt.yticks(np.arange(len(top_tumor_specific)), top_tumor_specific['junction_id'])
+        plt.xlabel('Read Count')
+        plt.title('Top 20 Tumor-Specific Splice Junctions')
+        plt.tight_layout()
+        plt.savefig(f"{plots_dir}/top_tumor_specific_junctions.png")
+        plt.close()
+    
+    return tumor_specific_df, differential_junctions
+
+# Snakemake integration
+if __name__ == "__main__":
+    tumor_junctions_files = snakemake.input.tumor_junctions
+    normal_junctions_files = snakemake.input.normal_junctions
+    tumor_specific_output = snakemake.output.tumor_specific
+    differential_output = snakemake.output.differential
+    plots_dir = snakemake.output.plots_dir
+    
+    compare_junctions(tumor_junctions_files, normal_junctions_files, 
+                     tumor_specific_output, differential_output, plots_dir)
+```
+
+### `scripts/filter_fusions.py`
+
+```python
+#!/usr/bin/env python
+"""
+Filter and analyze tumor-specific fusion candidates
+"""
+
+import sys
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def filter_tumor_specific_fusions(tumor_fusions_files, normal_fusions_files, 
+                                 output_file, plots_dir):
+    """
+    Filter for tumor-specific fusion candidates
+    """
+    
+    # Create plots directory
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    # Combine tumor and normal fusion data
+    tumor_fusions_all = []
+    for file in tumor_fusions_files:
+        fusions = pd.read_csv(file)
+        sample_id = os.path.basename(file).split('_')[0]
+        fusions['sample'] = sample_id
+        tumor_fusions_all.append(fusions)
+    
+    normal_fusions_all = []
+    for file in normal_fusions_files:
+        fusions = pd.read_csv(file)
+        sample_id = os.path.basename(file).split('_')[0]
+        fusions['sample'] = sample_id
+        normal_fusions_all.append(fusions)
+    
+    # Combine all samples
+    if tumor_fusions_all:
+        tumor_fusions = pd.concat(tumor_fusions_all)
+    else:
+        tumor_fusions = pd.DataFrame(columns=['gene1_id', 'gene2_id', 'supporting_reads',
+                                             'gene1_name', 'gene2_name', 'fusion_name', 'sample'])
+    
+    if normal_fusions_all:
+

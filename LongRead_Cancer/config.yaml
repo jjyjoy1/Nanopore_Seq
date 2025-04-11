@@ -1,0 +1,49 @@
+# Sample information
+samples:
+  tumor_sample:
+    fastq: "data/raw/tumor.fastq"
+    type: "tumor"
+  normal_sample:
+    fastq: "data/raw/normal.fastq"
+    type: "normal"
+
+# Reference files
+reference:
+  genome: "data/reference/genome.fa"
+  annotation: "data/reference/annotation.gtf"
+  variants: "data/reference/variants.vcf"  # For ASE analysis
+
+# Clinical data
+clinical_data: "data/clinical/clinical_data.csv"
+
+# Output directories
+output:
+  base_dir: "results"
+  qc_dir: "results/qc"
+  align_dir: "results/alignments"
+  transcript_dir: "results/transcripts"
+  splicing_dir: "results/splicing"
+  fusion_dir: "results/fusions"
+  ase_dir: "results/ase"
+  clinical_dir: "results/clinical"
+  plot_dir: "results/plots"
+
+# Analysis parameters
+params:
+  alignment:
+    threads: 16
+    extra: "-uf -k14"
+  qc:
+    min_read_length: 500
+  transcripts:
+    min_coverage: 3
+  splicing:
+    min_support: 3
+  fusion:
+    min_support: 2
+  ase:
+    min_coverage: 10
+  clinical:
+    outcome_column: "survival_months"
+    event_column: "event"
+    sample_id_column: "sample_id"
